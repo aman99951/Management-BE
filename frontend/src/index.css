@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary-50: #ecfdf5;
+  --color-primary-100: #d1fae5;
+  --color-primary-200: #a7f3d0;
+  --color-primary-300: #6ee7b7;
+  --color-primary-400: #34d399;
+  --color-primary-500: #0d9488;
+  --color-primary-600: #0f766e;
+  --color-primary-700: #115e59;
+  --color-primary-800: #134e4a;
+  --color-primary-900: #042f2e;
+  --color-sidebar: #0c1222;
+  --color-sidebar-hover: #1a2332;
+  --color-sidebar-active: #0d9488;
+  --color-header-bg: rgba(255,255,255,0.72);
+  --color-header-border: #e2e8f0;
+  --color-page-bg: #f0f2f5;
+  --color-card-bg: #ffffff;
+  --color-card-border: #e2e8f0;
+  --color-text-primary: #0b1a2e;
+  --color-text-secondary: #55657b;
+  --color-text-muted: #94a3b8;
+  --color-badge-bg: #f1f5f9;
+  --color-badge-text: #475569;
+  --color-danger: #ef4444;
+  --color-danger-hover: #dc2626;
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+}
+
+body {
+  background: var(--color-page-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes slide-left {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.animate-fade-in {
+  animation: fade-in 0.4s ease-out forwards;
+}
+.animate-slide-up {
+  animation: slide-up 0.5s ease-out forwards;
+}
+.animate-scale-in {
+  animation: scale-in 0.3s ease-out forwards;
+}
+.animate-slide-left {
+  animation: slide-left 0.25s ease-out forwards;
+}
+.animate-stagger > * {
+  opacity: 0;
+  animation: slide-up 0.4s ease-out forwards;
+}
+.animate-stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.animate-stagger > *:nth-child(2) { animation-delay: 0.06s; }
+.animate-stagger > *:nth-child(3) { animation-delay: 0.10s; }
+.animate-stagger > *:nth-child(4) { animation-delay: 0.14s; }
+.animate-stagger > *:nth-child(5) { animation-delay: 0.18s; }
+.animate-stagger > *:nth-child(6) { animation-delay: 0.22s; }
+.animate-stagger > *:nth-child(7) { animation-delay: 0.26s; }
