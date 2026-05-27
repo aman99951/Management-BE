@@ -142,15 +142,20 @@ class TaskViewSet(viewsets.ModelViewSet):
         return Response(serializer.errors, status=400)
 
 @api_view(['GET', 'POST'])
+@csrf_exempt
 def fathom_config_view(request):
     if request.method == 'GET':
         config = get_config()
         if not config:
-            return Response({'configured': False})
-        return Response({'configured': True})
-    serializer = FathomConfigSerializer(data=request.data)
+            return JsonResponse({'configured': False})
+        return JsonResponse({'configured': True})
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    serializer = FathomConfigSerializer(data=data)
     if not serializer.is_valid():
-        return Response(serializer.errors, status=400)
+        return JsonResponse(serializer.errors, status=400)
     config = get_config()
     if config:
         for key, val in serializer.validated_data.items():
@@ -158,7 +163,7 @@ def fathom_config_view(request):
         config.save()
     else:
         config = FathomConfig.objects.create(**serializer.validated_data)
-    return Response({'configured': True})
+    return JsonResponse({'configured': True})
 
 @csrf_exempt
 @require_POST
@@ -323,7 +328,6 @@ def verify_sso(request):
         }
     })
     from django.middleware.csrf import get_token
-    secure = not settings.DEBUG
     response.set_cookie(
         settings.SESSION_COOKIE_NAME,
         request.session.session_key,
@@ -332,6 +336,16 @@ def verify_sso(request):
         secure=secure,
         httponly=settings.SESSION_COOKIE_HTTPONLY,
         samesite=settings.SESSION_COOKIE_SAMESITE,
+    )
+    get_token(request)
+    response.set_cookie(
+        'csrftoken',
+        request.META.get('CSRF_COOKIE', ''),
+        max_age=settings.CSRF_COOKIE_AGE or 31449600,
+        path=settings.CSRF_COOKIE_PATH or '/',
+        secure=secure,
+        httponly=False,
+        samesite=settings.CSRF_COOKIE_SAMESITE or 'None',
     )
     response.set_cookie(
         'csrftoken',
