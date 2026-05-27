@@ -28,32 +28,39 @@ Meeting: {meeting_title}
 Transcript:
 {summary_text}"""
 
-    try:
-        resp = requests.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "http://localhost:5173",
-            },
-            json={
-                "model": settings.OPENROUTER_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-                "max_tokens": 4096,
-            },
-            timeout=180,
-        )
-    except requests.RequestException:
-        return None
+    import time
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "http://localhost:5173",
+                },
+                json={
+                    "model": settings.OPENROUTER_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 4096,
+                },
+                timeout=180,
+            )
+            if resp.status_code == 200:
+                try:
+                    content = resp.json()["choices"][0]["message"]["content"]
+                except (KeyError, IndexError, json.JSONDecodeError):
+                    content = None
+                if content:
+                    result = _parse_json_response(content)
+                    if result:
+                        return result
+        except requests.RequestException:
+            pass
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))
 
-    if resp.status_code != 200:
-        return None
-
-    try:
-        content = resp.json()["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, json.JSONDecodeError):
-        return None
+    return None
 
     if not content:
         return None
