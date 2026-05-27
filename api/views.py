@@ -250,6 +250,46 @@ def oauth_sso(request):
     return HttpResponseRedirect(f'{frontend_url}/?sso={token}')
 
 @csrf_exempt
+def google_oauth_callback(request):
+    frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+    code = request.GET.get('code')
+    if not code:
+        return HttpResponseRedirect(f'{frontend_url}/login?error=missing_code')
+    client_id = os.getenv('GOOGLE_CLIENT_ID', '')
+    client_secret = os.getenv('GOOGLE_CLIENT_SECRET', '')
+    if not client_id or not client_secret:
+        return HttpResponseRedirect(f'{frontend_url}/login?error=missing_oauth_config')
+    token_resp = http_requests.post('https://oauth2.googleapis.com/token', data={
+        'code': code,
+        'client_id': client_id,
+        'client_secret': client_secret,
+        'redirect_uri': f'{os.getenv("BACKEND_URL", "http://127.0.0.1:8000")}/accounts/google/login/callback/',
+        'grant_type': 'authorization_code',
+    })
+    if token_resp.status_code != 200:
+        return HttpResponseRedirect(f'{frontend_url}/login?error=token_exchange_failed')
+    tokens = token_resp.json()
+    userinfo_resp = http_requests.get('https://www.googleapis.com/oauth2/v2/userinfo', headers={
+        'Authorization': f'Bearer {tokens["access_token"]}'
+    })
+    if userinfo_resp.status_code != 200:
+        return HttpResponseRedirect(f'{frontend_url}/login?error=userinfo_failed')
+    info = userinfo_resp.json()
+    email = info.get('email')
+    if not email:
+        return HttpResponseRedirect(f'{frontend_url}/login?error=no_email')
+    user, _ = User.objects.get_or_create(
+        username=email,
+        defaults={
+            'email': email,
+            'first_name': info.get('given_name', ''),
+            'last_name': info.get('family_name', ''),
+        }
+    )
+    token = sso_signer.sign(str(user.pk))
+    return HttpResponseRedirect(f'{frontend_url}/?sso={token}')
+
+@csrf_exempt
 @require_POST
 def verify_sso(request):
     try:
