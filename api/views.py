@@ -8,6 +8,7 @@ from django.conf import settings
 from django.http import JsonResponse, HttpResponse, HttpResponseRedirect
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
+from django.middleware.csrf import get_token
 from django.core.signing import Signer, BadSignature
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
@@ -320,43 +321,15 @@ def verify_sso(request):
     login(request, user, backend='django.contrib.auth.backends.ModelBackend')
     request.session.save()
 
-    response = JsonResponse({
+    get_token(request)
+
+    return JsonResponse({
         'authenticated': True,
         'user': {
             'email': user.email,
             'name': user.get_full_name() or user.username,
         }
     })
-    from django.middleware.csrf import get_token
-    response.set_cookie(
-        settings.SESSION_COOKIE_NAME,
-        request.session.session_key,
-        max_age=settings.SESSION_COOKIE_AGE,
-        path=settings.SESSION_COOKIE_PATH,
-        secure=secure,
-        httponly=settings.SESSION_COOKIE_HTTPONLY,
-        samesite=settings.SESSION_COOKIE_SAMESITE,
-    )
-    get_token(request)
-    response.set_cookie(
-        'csrftoken',
-        request.META.get('CSRF_COOKIE', ''),
-        max_age=settings.CSRF_COOKIE_AGE or 31449600,
-        path=settings.CSRF_COOKIE_PATH or '/',
-        secure=secure,
-        httponly=False,
-        samesite=settings.CSRF_COOKIE_SAMESITE or 'None',
-    )
-    response.set_cookie(
-        'csrftoken',
-        get_token(request),
-        max_age=settings.CSRF_COOKIE_AGE or 31449600,
-        path=settings.CSRF_COOKIE_PATH or '/',
-        secure=secure,
-        httponly=False,
-        samesite=settings.CSRF_COOKIE_SAMESITE or 'None',
-    )
-    return response
 
 @api_view(['GET'])
 def auth_session(request):
