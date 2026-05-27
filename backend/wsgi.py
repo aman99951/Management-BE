@@ -13,7 +13,7 @@ from allauth.socialaccount.models import SocialApp
 try:
     connection.ensure_connection()
     call_command('migrate', '--no-input', stdout=None, stderr=None)
-    Site.objects.get_or_create(
+    Site.objects.update_or_create(
         pk=1,
         defaults={
             'domain': os.environ.get('SITE_DOMAIN', 'management-be-eight.vercel.app'),
@@ -23,7 +23,7 @@ try:
     client_id = os.environ.get('GOOGLE_CLIENT_ID', '')
     client_secret = os.environ.get('GOOGLE_CLIENT_SECRET', '')
     if client_id and 'your-google' not in client_id and client_secret and 'your-google' not in client_secret:
-        app, _ = SocialApp.objects.get_or_create(
+        app, _ = SocialApp.objects.update_or_create(
             provider='google',
             name='Google',
             defaults={
