@@ -292,9 +292,8 @@ def google_oauth_callback(request):
             'last_name': info.get('family_name', ''),
         }
     )
-    login(request, user, backend='django.contrib.auth.backends.ModelBackend')
-    get_token(request)
-    return HttpResponseRedirect(frontend_url)
+    token = sso_signer.sign(str(user.pk))
+    return HttpResponseRedirect(f'{frontend_url}/?sso={token}')
 
 @csrf_exempt
 @require_POST
@@ -319,12 +318,9 @@ def verify_sso(request):
     except User.DoesNotExist:
         return JsonResponse({'error': 'User not found'}, status=400)
 
-    login(request, user, backend='django.contrib.auth.backends.ModelBackend')
-
-    get_token(request)
-
     return JsonResponse({
         'authenticated': True,
+        'token': token,
         'user': {
             'email': user.email,
             'name': user.get_full_name() or user.username,
