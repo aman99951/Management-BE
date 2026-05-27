@@ -263,7 +263,7 @@ def google_oauth_callback(request):
         'code': code,
         'client_id': client_id,
         'client_secret': client_secret,
-        'redirect_uri': f'{os.getenv("BACKEND_URL", "http://127.0.0.1:8000")}/accounts/google/login/callback/',
+        'redirect_uri': request.build_absolute_uri(request.path),
         'grant_type': 'authorization_code',
     })
     if token_resp.status_code != 200:
