@@ -70,6 +70,10 @@ class MeetingViewSet(viewsets.ModelViewSet):
         if transcript_text:
             input_text += f"Transcript:\n{transcript_text}\n"
 
+        api_key = settings.OPENROUTER_API_KEY
+        if not api_key:
+            return Response({'error': 'OpenRouter API key not configured. Set OPENROUTER_API_KEY in backend settings.'}, status=400)
+
         def run():
             import django
             django.db.close_old_connections()
@@ -450,6 +454,9 @@ def generate_ai_tasks(request):
     from .ai_service import generate_tasks_from_summary
     from .serializers import TaskSerializer
 
+    if not settings.OPENROUTER_API_KEY:
+        return JsonResponse({'error': 'OpenRouter API key not configured. Set OPENROUTER_API_KEY in backend settings.'}, status=400)
+
     _ai_generation_running = True
 
     def run():
@@ -457,17 +464,16 @@ def generate_ai_tasks(request):
         import django
         django.db.close_old_connections()
         try:
-            Task.objects.all().delete()
             meetings = Meeting.objects.exclude(summary='').exclude(summary__isnull=True)
             for meeting in meetings:
+                if Task.objects.filter(meeting=meeting, source='ai').exists():
+                    continue
                 ai_tasks = generate_tasks_from_summary(meeting.summary, meeting.title)
                 if not ai_tasks or not isinstance(ai_tasks, list):
                     continue
-                existing_titles = set(Task.objects.filter(meeting=meeting).values_list('title', flat=True))
+                meeting_date = meeting.recorded_at or meeting.created_at
                 for t in ai_tasks:
                     title = (t.get('title') or 'Untitled Task')[:500]
-                    if title in existing_titles:
-                        continue
                     desc = t.get('description', '')
                     if isinstance(desc, list):
                         desc = '\n'.join(f'- {item}' for item in desc)
@@ -485,6 +491,8 @@ def generate_ai_tasks(request):
                         meeting=meeting,
                         status='pending',
                         priority=priority,
+                        source='ai',
+                        created_at=meeting_date,
                     )
         finally:
             _ai_generation_running = False
