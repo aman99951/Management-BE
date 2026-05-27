@@ -77,7 +77,7 @@ class MeetingViewSet(viewsets.ModelViewSet):
 
         ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
         if not ai_tasks or not isinstance(ai_tasks, list):
-            return Response({'status': 'failed', 'error': 'AI returned no valid tasks. Check OpenRouter model and API key.'}, status=500)
+            return Response({'status': 'failed', 'error': f'AI returned no valid tasks. Model={settings.OPENROUTER_MODEL}, API key set={"yes" if settings.OPENROUTER_API_KEY else "no"}, input_len={len(input_text)}'}, status=500)
 
         Task.objects.filter(meeting=meeting).delete()
         meeting_date = meeting.recorded_at or meeting.created_at
