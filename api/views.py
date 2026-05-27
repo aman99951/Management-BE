@@ -292,8 +292,9 @@ def google_oauth_callback(request):
             'last_name': info.get('family_name', ''),
         }
     )
-    token = sso_signer.sign(str(user.pk))
-    return HttpResponseRedirect(f'{frontend_url}/?sso={token}')
+    login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+    get_token(request)
+    return HttpResponseRedirect(frontend_url)
 
 @csrf_exempt
 @require_POST
