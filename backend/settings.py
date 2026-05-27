@@ -51,6 +51,9 @@ AUTHENTICATION_BACKENDS = [
     'allauth.account.auth_backends.AuthenticationBackend',
 ]
 
+ACCOUNT_ADAPTER = 'api.adapter.CustomAccountAdapter'
+SOCIALACCOUNT_ADAPTER = 'api.adapter.CustomSocialAccountAdapter'
+
 SOCIALACCOUNT_PROVIDERS = {
     'google': {
         'SCOPE': ['profile', 'email'],
