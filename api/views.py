@@ -319,7 +319,6 @@ def verify_sso(request):
         return JsonResponse({'error': 'User not found'}, status=400)
 
     login(request, user, backend='django.contrib.auth.backends.ModelBackend')
-    request.session.save()
 
     get_token(request)
 
