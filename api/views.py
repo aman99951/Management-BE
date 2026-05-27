@@ -70,48 +70,42 @@ class MeetingViewSet(viewsets.ModelViewSet):
         if transcript_text:
             input_text += f"Transcript:\n{transcript_text}\n"
 
-        api_key = settings.OPENROUTER_API_KEY
-        if not api_key:
+        if not settings.OPENROUTER_API_KEY:
             return Response({'error': 'OpenRouter API key not configured. Set OPENROUTER_API_KEY in backend settings.'}, status=400)
 
-        def run():
-            import django
-            django.db.close_old_connections()
-            from .ai_service import generate_tasks_from_summary
+        from .ai_service import generate_tasks_from_summary
 
-            ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
-            if not ai_tasks or not isinstance(ai_tasks, list):
-                return
-            Task.objects.filter(meeting=meeting).delete()
-            meeting_date = meeting.recorded_at or meeting.created_at
-            for t in ai_tasks:
-                title = (t.get('title') or 'Untitled Task')[:500]
-                desc = t.get('description', '')
-                if isinstance(desc, list):
-                    desc = '\n'.join(f'- {item}' for item in desc)
-                assignee_name = t.get('assignee')
-                employee = None
-                if assignee_name:
-                    employee = Employee.objects.filter(name__iexact=assignee_name.strip()).first()
-                priority = t.get('priority', 'medium')
-                if priority not in dict(Task.PRIORITY_CHOICES):
-                    priority = 'medium'
-                Task.objects.create(
-                    title=title,
-                    description=desc,
-                    assigned_to=employee,
-                    meeting=meeting,
-                    status='pending',
-                    priority=priority,
-                    source='ai',
-                    created_at=meeting_date,
-                )
+        ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
+        if not ai_tasks or not isinstance(ai_tasks, list):
+            return Response({'status': 'failed', 'error': 'AI returned no valid tasks. Check OpenRouter model and API key.'}, status=500)
 
-        import threading
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
+        Task.objects.filter(meeting=meeting).delete()
+        meeting_date = meeting.recorded_at or meeting.created_at
+        for t in ai_tasks:
+            title = (t.get('title') or 'Untitled Task')[:500]
+            desc = t.get('description', '')
+            if isinstance(desc, list):
+                desc = '\n'.join(f'- {item}' for item in desc)
+            assignee_name = t.get('assignee')
+            employee = None
+            if assignee_name:
+                employee = Employee.objects.filter(name__iexact=assignee_name.strip()).first()
+            priority = t.get('priority', 'medium')
+            if priority not in dict(Task.PRIORITY_CHOICES):
+                priority = 'medium'
+            Task.objects.create(
+                title=title,
+                description=desc,
+                assigned_to=employee,
+                meeting=meeting,
+                status='pending',
+                priority=priority,
+                source='ai',
+                created_at=meeting_date,
+            )
 
-        return Response({'status': 'started', 'message': 'AI task generation started'})
+        from .serializers import TaskSerializer
+        return Response({'status': 'created', 'tasks': TaskSerializer(Task.objects.filter(meeting=meeting), many=True).data})
 
 class TaskViewSet(viewsets.ModelViewSet):
     queryset = Task.objects.all()
@@ -439,17 +433,12 @@ def extract_tasks_all(request):
         count += new_count
     return JsonResponse({'tasks_created': count})
 
-_ai_generation_running = False
-
 @csrf_exempt
 def generate_ai_tasks(request):
-    global _ai_generation_running
     if request.method == 'OPTIONS':
         return HttpResponse()
     if request.method != 'POST':
         return JsonResponse({'error': 'POST required'}, status=405)
-    if _ai_generation_running:
-        return JsonResponse({'status': 'running', 'message': 'AI generation already in progress'})
 
     from .ai_service import generate_tasks_from_summary
     from .serializers import TaskSerializer
@@ -457,48 +446,37 @@ def generate_ai_tasks(request):
     if not settings.OPENROUTER_API_KEY:
         return JsonResponse({'error': 'OpenRouter API key not configured. Set OPENROUTER_API_KEY in backend settings.'}, status=400)
 
-    _ai_generation_running = True
+    total = 0
+    meetings = Meeting.objects.exclude(summary='').exclude(summary__isnull=True)
+    for meeting in meetings:
+        if Task.objects.filter(meeting=meeting, source='ai').exists():
+            continue
+        ai_tasks = generate_tasks_from_summary(meeting.summary, meeting.title)
+        if not ai_tasks or not isinstance(ai_tasks, list):
+            continue
+        meeting_date = meeting.recorded_at or meeting.created_at
+        for t in ai_tasks:
+            title = (t.get('title') or 'Untitled Task')[:500]
+            desc = t.get('description', '')
+            if isinstance(desc, list):
+                desc = '\n'.join(f'- {item}' for item in desc)
+            assignee_name = t.get('assignee')
+            employee = None
+            if assignee_name:
+                employee = Employee.objects.filter(name__iexact=assignee_name.strip()).first()
+            priority = t.get('priority', 'medium')
+            if priority not in dict(Task.PRIORITY_CHOICES):
+                priority = 'medium'
+            Task.objects.create(
+                title=title,
+                description=desc,
+                assigned_to=employee,
+                meeting=meeting,
+                status='pending',
+                priority=priority,
+                source='ai',
+                created_at=meeting_date,
+            )
+            total += 1
 
-    def run():
-        global _ai_generation_running
-        import django
-        django.db.close_old_connections()
-        try:
-            meetings = Meeting.objects.exclude(summary='').exclude(summary__isnull=True)
-            for meeting in meetings:
-                if Task.objects.filter(meeting=meeting, source='ai').exists():
-                    continue
-                ai_tasks = generate_tasks_from_summary(meeting.summary, meeting.title)
-                if not ai_tasks or not isinstance(ai_tasks, list):
-                    continue
-                meeting_date = meeting.recorded_at or meeting.created_at
-                for t in ai_tasks:
-                    title = (t.get('title') or 'Untitled Task')[:500]
-                    desc = t.get('description', '')
-                    if isinstance(desc, list):
-                        desc = '\n'.join(f'- {item}' for item in desc)
-                    assignee_name = t.get('assignee')
-                    employee = None
-                    if assignee_name:
-                        employee = Employee.objects.filter(name__iexact=assignee_name.strip()).first()
-                    priority = t.get('priority', 'medium')
-                    if priority not in dict(Task.PRIORITY_CHOICES):
-                        priority = 'medium'
-                    Task.objects.create(
-                        title=title,
-                        description=desc,
-                        assigned_to=employee,
-                        meeting=meeting,
-                        status='pending',
-                        priority=priority,
-                        source='ai',
-                        created_at=meeting_date,
-                    )
-        finally:
-            _ai_generation_running = False
-
-    import threading
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-
-    return JsonResponse({'status': 'started', 'message': 'AI task generation started in background. Refresh to see results.'})
+    return JsonResponse({'status': 'completed', 'tasks_created': total, 'message': f'{total} AI tasks generated across all meetings.'})

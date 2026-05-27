@@ -5,10 +5,15 @@ from django.conf import settings
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+MAX_INPUT_CHARS = 8000
+
 def generate_tasks_from_summary(summary_text, meeting_title):
     api_key = settings.OPENROUTER_API_KEY
     if not api_key:
         return None
+
+    if len(summary_text) > MAX_INPUT_CHARS:
+        summary_text = summary_text[:MAX_INPUT_CHARS] + "\n\n[Note: transcript truncated due to length]"
 
     prompt = f"""You are a task extraction assistant. Extract ALL action items and tasks for EVERY person mentioned in this meeting transcript. For each task determine:
 - title: a concise title (max 100 chars)
@@ -29,7 +34,7 @@ Transcript:
 {summary_text}"""
 
     import time
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             resp = requests.post(
                 OPENROUTER_URL,
@@ -42,9 +47,9 @@ Transcript:
                     "model": settings.OPENROUTER_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.1,
-                    "max_tokens": 4096,
+                    "max_tokens": 2048,
                 },
-                timeout=180,
+                timeout=30,
             )
             if resp.status_code == 200:
                 try:
@@ -57,15 +62,10 @@ Transcript:
                         return result
         except requests.RequestException:
             pass
-        if attempt < 2:
-            time.sleep(2 * (attempt + 1))
+        if attempt < 1:
+            time.sleep(2)
 
     return None
-
-    if not content:
-        return None
-
-    return _parse_json_response(content)
 
 
 def _parse_json_response(content):
