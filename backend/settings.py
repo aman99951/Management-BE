@@ -59,7 +59,7 @@ SOCIALACCOUNT_PROVIDERS = {
 }
 
 LOGIN_REDIRECT_URL = '/api/auth/sso/'
-ACCOUNT_LOGOUT_REDIRECT_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+ACCOUNT_LOGOUT_REDIRECT_URL = os.getenv('FRONTEND_URL', 'https://management-f-e.vercel.app')
 ACCOUNT_EMAIL_VERIFICATION = 'none'
 ACCOUNT_LOGIN_METHODS = {'email', 'username'}
 SOCIALACCOUNT_AUTO_SIGNUP = True

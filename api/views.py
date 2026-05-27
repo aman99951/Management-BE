@@ -12,6 +12,7 @@ from django.core.signing import Signer, BadSignature
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import json
+import os
 import requests as http_requests
 from .models import Employee, Meeting, Task, FathomConfig, Comment
 from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, FathomWebhookSerializer, CommentSerializer
@@ -242,10 +243,11 @@ def google_auth(request):
 sso_signer = Signer()
 
 def oauth_sso(request):
+    frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
     if not request.user.is_authenticated:
-        return HttpResponseRedirect('http://127.0.0.1:5173/login')
+        return HttpResponseRedirect(f'{frontend_url}/login')
     token = sso_signer.sign(str(request.user.pk))
-    return HttpResponseRedirect(f'http://127.0.0.1:5173/?sso={token}')
+    return HttpResponseRedirect(f'{frontend_url}/?sso={token}')
 
 @csrf_exempt
 @require_POST
