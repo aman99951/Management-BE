@@ -322,14 +322,25 @@ def verify_sso(request):
             'name': user.get_full_name() or user.username,
         }
     })
+    from django.middleware.csrf import get_token
+    secure = not settings.DEBUG
     response.set_cookie(
         settings.SESSION_COOKIE_NAME,
         request.session.session_key,
         max_age=settings.SESSION_COOKIE_AGE,
         path=settings.SESSION_COOKIE_PATH,
-        secure=True,
+        secure=secure,
         httponly=settings.SESSION_COOKIE_HTTPONLY,
         samesite=settings.SESSION_COOKIE_SAMESITE,
+    )
+    response.set_cookie(
+        'csrftoken',
+        get_token(request),
+        max_age=settings.CSRF_COOKIE_AGE or 31449600,
+        path=settings.CSRF_COOKIE_PATH or '/',
+        secure=secure,
+        httponly=False,
+        samesite=settings.CSRF_COOKIE_SAMESITE or 'None',
     )
     return response
 
