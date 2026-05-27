@@ -313,14 +313,25 @@ def verify_sso(request):
         return JsonResponse({'error': 'User not found'}, status=400)
 
     login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+    request.session.save()
 
-    return JsonResponse({
+    response = JsonResponse({
         'authenticated': True,
         'user': {
             'email': user.email,
             'name': user.get_full_name() or user.username,
         }
     })
+    response.set_cookie(
+        settings.SESSION_COOKIE_NAME,
+        request.session.session_key,
+        max_age=settings.SESSION_COOKIE_AGE,
+        path=settings.SESSION_COOKIE_PATH,
+        secure=True,
+        httponly=settings.SESSION_COOKIE_HTTPONLY,
+        samesite=settings.SESSION_COOKIE_SAMESITE,
+    )
+    return response
 
 @api_view(['GET'])
 def auth_session(request):
