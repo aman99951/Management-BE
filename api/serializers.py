@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Employee, Meeting, Task, Comment, FathomConfig
+from .models import Employee, Meeting, Task, Comment, FathomConfig, GoogleCalendarToken, ScheduledMeeting, Notification
 
 class EmployeeSerializer(serializers.ModelSerializer):
     class Meta:
@@ -16,6 +16,16 @@ class MeetingSerializer(serializers.ModelSerializer):
 
     def get_tasks(self, obj):
         return TaskSerializer(obj.tasks.all(), many=True).data
+
+class GoogleCalendarTokenSerializer(serializers.ModelSerializer):
+    connected = serializers.SerializerMethodField()
+
+    class Meta:
+        model = GoogleCalendarToken
+        fields = ['connected']
+
+    def get_connected(self, obj):
+        return bool(obj.access_token)
 
 class CommentSerializer(serializers.ModelSerializer):
     author_name = serializers.CharField(source='author.name', read_only=True, default=None)
@@ -53,6 +63,30 @@ class FathomConfigSerializer(serializers.ModelSerializer):
             'api_key': {'write_only': True},
             'webhook_secret': {'write_only': True},
         }
+
+class ScheduledMeetingSerializer(serializers.ModelSerializer):
+    attendees_details = EmployeeSerializer(source='attendees', many=True, read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, default=None)
+
+    class Meta:
+        model = ScheduledMeeting
+        fields = '__all__'
+        extra_kwargs = {
+            'created_by': {'read_only': True},
+        }
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    recipient_name = serializers.CharField(source='recipient.name', read_only=True)
+    meeting_title = serializers.CharField(source='meeting.title', read_only=True, default=None)
+
+    class Meta:
+        model = Notification
+        fields = '__all__'
+        extra_kwargs = {
+            'is_read': {'required': False},
+        }
+
 
 class FathomWebhookSerializer(serializers.Serializer):
     recording_id = serializers.IntegerField()

@@ -56,8 +56,16 @@ SOCIALACCOUNT_ADAPTER = 'api.adapter.CustomSocialAccountAdapter'
 
 SOCIALACCOUNT_PROVIDERS = {
     'google': {
-        'SCOPE': ['profile', 'email'],
-        'AUTH_PARAMS': {'access_type': 'online'},
+        'SCOPE': [
+            'profile',
+            'email',
+            'https://www.googleapis.com/auth/calendar',
+            'https://www.googleapis.com/auth/calendar.events',
+        ],
+        'AUTH_PARAMS': {
+            'access_type': 'offline',
+            'prompt': 'consent',
+        },
     }
 }
 
@@ -159,6 +167,9 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'https://management-f-e.vercel.app,http://localhost:5173,http://localhost:8000,http://127.0.0.1:5173,http://127.0.0.1:8000').split(',')
 CORS_ALLOW_CREDENTIALS = True
+
+GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
+GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
 
 FATHOM_OAUTH_REDIRECT_URI = os.getenv('FATHOM_OAUTH_REDIRECT_URI', 'https://management-f-e.vercel.app/settings')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')

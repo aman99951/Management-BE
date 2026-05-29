@@ -14,10 +14,16 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import json
 import os
+from datetime import datetime, timedelta
+from django.db.models import Count, Q
+from django.db.models.functions import TruncDay
+from django.utils import timezone
 import requests as http_requests
-from .models import Employee, Meeting, Task, FathomConfig, Comment
-from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, FathomWebhookSerializer, CommentSerializer
+from .models import Employee, Meeting, Task, FathomConfig, Comment, GoogleCalendarToken, ScheduledMeeting, Notification
+from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, FathomWebhookSerializer, CommentSerializer, GoogleCalendarTokenSerializer, ScheduledMeetingSerializer, NotificationSerializer
 from .services import sync_meetings, process_webhook_payload, get_config, get_user_fathom_token, fathom_headers, FATHOM_API_BASE
+from .google_calendar import (create_meet_event, list_upcoming_events, sync_calendar_events, get_google_calendar_auth_url, get_google_calendar_credentials)
+from urllib.parse import urlencode
 
 class EmployeeViewSet(viewsets.ModelViewSet):
     queryset = Employee.objects.all()
@@ -180,12 +186,72 @@ def fathom_webhook_view(request):
 
 @api_view(['GET'])
 def dashboard_stats(request):
+    total_tasks = Task.objects.count()
+    completed_tasks = Task.objects.filter(status='completed').count()
+
+    employees_data = Employee.objects.annotate(
+        total_tasks=Count('tasks'),
+        pending_tasks=Count('tasks', filter=Q(tasks__status='pending')),
+        in_progress_tasks=Count('tasks', filter=Q(tasks__status='in_progress')),
+        completed_task_count=Count('tasks', filter=Q(tasks__status='completed')),
+    ).values('id', 'name', 'total_tasks', 'pending_tasks', 'in_progress_tasks', 'completed_task_count')
+
+    employee_progress = []
+    for e in employees_data:
+        rate = round((e['completed_task_count'] / e['total_tasks'] * 100), 1) if e['total_tasks'] > 0 else 0
+        employee_progress.append({
+            'id': e['id'],
+            'name': e['name'],
+            'total': e['total_tasks'],
+            'pending': e['pending_tasks'],
+            'in_progress': e['in_progress_tasks'],
+            'completed': e['completed_task_count'],
+            'completion_rate': rate,
+        })
+
+    task_by_status = {
+        'pending': Task.objects.filter(status='pending').count(),
+        'in_progress': Task.objects.filter(status='in_progress').count(),
+        'completed': completed_tasks,
+    }
+
+    task_by_priority = {}
+    for p in ['critical', 'high', 'medium', 'low']:
+        task_by_priority[p] = Task.objects.filter(priority=p).count()
+
+    task_by_source = {}
+    for s in ['fathom', 'ai', 'manual']:
+        task_by_source[s] = Task.objects.filter(source=s).count()
+
+    scheduled_status = {}
+    for s in ['scheduled', 'ongoing', 'completed', 'cancelled']:
+        scheduled_status[s] = ScheduledMeeting.objects.filter(status=s).count()
+
+    last_7 = timezone.now().date() - timedelta(days=6)
+    task_trends = (
+        Task.objects.annotate(day=TruncDay('created_at'))
+        .filter(created_at__date__gte=last_7)
+        .values('day')
+        .annotate(count=Count('id'))
+        .order_by('day')
+    )
+
     return Response({
         'total_meetings': Meeting.objects.count(),
-        'total_tasks': Task.objects.count(),
-        'pending_tasks': Task.objects.filter(status='pending').count(),
-        'completed_tasks': Task.objects.filter(status='completed').count(),
+        'total_tasks': total_tasks,
+        'pending_tasks': task_by_status['pending'],
+        'in_progress_tasks': task_by_status['in_progress'],
+        'completed_tasks': completed_tasks,
         'total_employees': Employee.objects.count(),
+        'employee_progress': employee_progress,
+        'task_by_status': task_by_status,
+        'task_by_priority': task_by_priority,
+        'task_by_source': task_by_source,
+        'scheduled_status': scheduled_status,
+        'task_trends': [
+            {'date': t['day'].isoformat() if t['day'] else '', 'count': t['count']}
+            for t in task_trends
+        ],
     })
 
 @csrf_exempt
@@ -259,8 +325,8 @@ def google_oauth_callback(request):
     code = request.GET.get('code')
     if not code:
         return HttpResponseRedirect(f'{frontend_url}/login?error=missing_code')
-    client_id = os.getenv('GOOGLE_CLIENT_ID', '')
-    client_secret = os.getenv('GOOGLE_CLIENT_SECRET', '')
+    client_id = settings.GOOGLE_CLIENT_ID
+    client_secret = settings.GOOGLE_CLIENT_SECRET
     if not client_id or not client_secret:
         return HttpResponseRedirect(f'{frontend_url}/login?error=missing_oauth_config')
     token_resp = http_requests.post('https://oauth2.googleapis.com/token', data={
@@ -290,6 +356,19 @@ def google_oauth_callback(request):
             'last_name': info.get('family_name', ''),
         }
     )
+
+    # If Calendar scopes were granted, save the tokens for Google Calendar API
+    granted_scopes = tokens.get('scope', '')
+    if 'calendar' in granted_scopes and tokens.get('refresh_token'):
+        GoogleCalendarToken.objects.update_or_create(
+            user=user,
+            defaults={
+                'access_token': tokens['access_token'],
+                'refresh_token': tokens['refresh_token'],
+                'expires_at': timezone.now() + timedelta(seconds=tokens.get('expires_in', 3600)),
+            },
+        )
+
     token = sso_signer.sign(str(user.pk))
     return HttpResponseRedirect(f'{frontend_url}/?sso={token}')
 
@@ -330,12 +409,14 @@ def auth_session(request):
     if not request.user.is_authenticated:
         return Response({'authenticated': False})
     fathom_token = get_user_fathom_token(request.user)
+    gc_connected = GoogleCalendarToken.objects.filter(user=request.user).exists()
     return Response({
         'authenticated': True,
         'user': {
             'email': request.user.email,
             'name': request.user.get_full_name() or request.user.username,
             'fathom_connected': bool(fathom_token),
+            'google_calendar_connected': gc_connected,
         }
     })
 
@@ -480,3 +561,339 @@ def generate_ai_tasks(request):
             total += 1
 
     return JsonResponse({'status': 'completed', 'tasks_created': total, 'message': f'{total} AI tasks generated across all meetings.'})
+
+
+# ── Google Calendar / Google Meet Views ──
+
+@api_view(['GET'])
+def google_calendar_status(request):
+    """Check if the user has connected their Google Calendar."""
+    if not request.user.is_authenticated:
+        return Response({'connected': False})
+    try:
+        token = GoogleCalendarToken.objects.get(user=request.user)
+        return Response({'connected': True, 'has_refresh_token': bool(token.refresh_token)})
+    except GoogleCalendarToken.DoesNotExist:
+        return Response({'connected': False})
+
+
+@api_view(['GET'])
+def google_calendar_auth_url(request):
+    """Get the Google OAuth URL for Calendar scopes."""
+    if not request.user.is_authenticated:
+        return Response({'error': 'Not authenticated'}, status=401)
+    url = get_google_calendar_auth_url(request)
+    return Response({'url': url})
+
+
+@csrf_exempt
+def google_calendar_oauth_callback(request):
+    """Handle the OAuth callback for Google Calendar (GET redirect from Google)."""
+    frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+
+    code = request.GET.get('code')
+    error = request.GET.get('error')
+
+    if error:
+        return HttpResponseRedirect(f'{frontend_url}/settings?calendar_error={error}')
+
+    if not code:
+        return HttpResponseRedirect(f'{frontend_url}/settings?calendar_error=missing_code')
+
+    if not request.user.is_authenticated:
+        return HttpResponseRedirect(f'{frontend_url}/login?calendar_error=not_authenticated')
+
+    client_id = settings.GOOGLE_CLIENT_ID
+    client_secret = settings.GOOGLE_CLIENT_SECRET
+    redirect_uri = request.build_absolute_uri('/api/google-calendar/oauth/callback/')
+
+    if not client_id or not client_secret:
+        return HttpResponseRedirect(f'{frontend_url}/settings?calendar_error=missing_config')
+
+    token_resp = http_requests.post('https://oauth2.googleapis.com/token', data={
+        'code': code,
+        'client_id': client_id,
+        'client_secret': client_secret,
+        'redirect_uri': redirect_uri,
+        'grant_type': 'authorization_code',
+    })
+
+    if token_resp.status_code != 200:
+        return HttpResponseRedirect(f'{frontend_url}/settings?calendar_error=token_exchange_failed')
+
+    tokens = token_resp.json()
+    access_token = tokens.get('access_token', '')
+    refresh_token = tokens.get('refresh_token', '')
+    expires_in = tokens.get('expires_in', 3600)
+
+    GoogleCalendarToken.objects.update_or_create(
+        user=request.user,
+        defaults={
+            'access_token': access_token,
+            'refresh_token': refresh_token,
+            'expires_at': timezone.now() + timedelta(seconds=expires_in),
+        },
+    )
+
+    return HttpResponseRedirect(f'{frontend_url}/meetings?calendar_connected=true')
+
+
+@api_view(['POST'])
+def google_calendar_create_meet(request):
+    """Create a Google Calendar event with Google Meet link."""
+    if not request.user.is_authenticated:
+        return Response({'error': 'Not authenticated'}, status=401)
+
+    title = request.data.get('title', 'Untitled Meeting')
+    description = request.data.get('description', '')
+
+    event, err = create_meet_event(request.user, title, description)
+    if not event:
+        if err == 'no_token':
+            return Response({'error': 'Failed to create Google Meet. Connect your Google Calendar in Settings first.'}, status=400)
+        return Response({'error': f'Google Calendar API error: {err}. Make sure the Google Calendar API is enabled in your Google Cloud project.'}, status=400)
+
+    # Extract the Meet link
+    meet_link = ''
+    if event.get('conferenceData') and event['conferenceData'].get('entryPoints'):
+        for entry in event['conferenceData']['entryPoints']:
+            if entry.get('entryPointType') == 'video':
+                meet_link = entry.get('uri', '')
+                break
+
+    # Save to our Meeting model
+    start_info = event.get('start', {})
+    start_time = start_info.get('dateTime') or start_info.get('date')
+    recorded_at = None
+    if start_time:
+        try:
+            recorded_at = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+        except (ValueError, AttributeError):
+            pass
+
+    meeting = Meeting.objects.create(
+        title=title,
+        meeting_url=meet_link,
+        google_event_id=event.get('id'),
+        recorded_at=recorded_at,
+        summary=description,
+    )
+
+    return Response({
+        'meeting': MeetingSerializer(meeting).data,
+        'event_id': event.get('id'),
+        'meet_link': meet_link,
+        'html_link': event.get('htmlLink'),
+    })
+
+
+@api_view(['GET'])
+def google_calendar_list_events(request):
+    """List upcoming events from Google Calendar."""
+    if not request.user.is_authenticated:
+        return Response({'error': 'Not authenticated'}, status=401)
+
+    events = list_upcoming_events(request.user, max_results=25)
+    if events is None:
+        gc_connected = GoogleCalendarToken.objects.filter(user=request.user).exists()
+        if gc_connected:
+            return Response({'error': 'Failed to fetch Google Calendar events. The Google Calendar API may not be enabled in your Google Cloud project.'}, status=400)
+        return Response({'error': 'Failed to fetch Google Calendar events. Connect your Google Calendar in Settings first.'}, status=400)
+
+    result = []
+    for event in events:
+        start_info = event.get('start', {})
+        start_time = start_info.get('dateTime') or start_info.get('date')
+
+        meet_link = ''
+        if event.get('conferenceData') and event['conferenceData'].get('entryPoints'):
+            for entry in event['conferenceData']['entryPoints']:
+                if entry.get('entryPointType') == 'video':
+                    meet_link = entry.get('uri', '')
+                    break
+
+        # Check if already synced
+        existing_meeting = Meeting.objects.filter(google_event_id=event.get('id')).first()
+
+        result.append({
+            'id': event.get('id'),
+            'title': event.get('summary', 'Untitled'),
+            'description': event.get('description', ''),
+            'start_time': start_time,
+            'meet_link': meet_link,
+            'html_link': event.get('htmlLink'),
+            'synced': existing_meeting is not None,
+            'meeting_id': existing_meeting.id if existing_meeting else None,
+        })
+
+    return Response({'events': result})
+
+
+@api_view(['POST'])
+def google_calendar_sync(request):
+    """Sync Google Calendar events to our Meeting model."""
+    if not request.user.is_authenticated:
+        return Response({'error': 'Not authenticated'}, status=401)
+
+    count = sync_calendar_events(request.user)
+    if count is None:
+        gc_connected = GoogleCalendarToken.objects.filter(user=request.user).exists()
+        if gc_connected:
+            return Response({'error': 'Failed to sync Google Calendar. The Google Calendar API may not be enabled in your Google Cloud project.'}, status=400)
+        return Response({'error': 'Failed to sync. Connect your Google Calendar in Settings first.'}, status=400)
+
+    return Response({'synced': count})
+
+
+@api_view(['POST'])
+def google_calendar_disconnect(request):
+    """Disconnect Google Calendar integration."""
+    if not request.user.is_authenticated:
+        return Response({'error': 'Not authenticated'}, status=401)
+
+    try:
+        token = GoogleCalendarToken.objects.get(user=request.user)
+        # Revoke the token
+        try:
+            http_requests.post('https://oauth2.googleapis.com/revoke', params={'token': token.access_token})
+        except Exception:
+            pass
+        token.delete()
+    except GoogleCalendarToken.DoesNotExist:
+        pass
+
+    return Response({'connected': False})
+
+
+# ── Schedule / Notifications Views ──
+
+class ScheduledMeetingViewSet(viewsets.ModelViewSet):
+    queryset = ScheduledMeeting.objects.all()
+    serializer_class = ScheduledMeetingSerializer
+
+    def get_queryset(self):
+        return ScheduledMeeting.objects.filter(created_by=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def invite(self, request, pk=None):
+        meeting = self.get_object()
+        employee_ids = request.data.get('employee_ids', [])
+        if not employee_ids:
+            return Response({'error': 'No employees selected'}, status=400)
+
+        employees = Employee.objects.filter(id__in=employee_ids)
+        meeting.attendees.add(*employees)
+
+        created = []
+        for emp in employees:
+            notif, was_created = Notification.objects.get_or_create(
+                recipient=emp,
+                meeting=meeting,
+                defaults={
+                    'title': f"Meeting Invitation: {meeting.title}",
+                    'message': (
+                        f"You've been invited to '{meeting.title}' on "
+                        f"{meeting.start_time.strftime('%b %d, %Y at %I:%M %p')}."
+                        + (f" Location: {meeting.location}" if meeting.location else "")
+                        + (f" Link: {meeting.meeting_url}" if meeting.meeting_url else "")
+                    ),
+                }
+            )
+            if was_created:
+                created.append(NotificationSerializer(notif).data)
+
+        return Response({
+            'invited': len(employees),
+            'notifications_created': len(created),
+            'attendees': ScheduledMeetingSerializer(meeting).data['attendees_details'],
+        })
+
+    @action(detail=True, methods=['post'])
+    def create_meet_link(self, request, pk=None):
+        """Attach a Google Meet link to this scheduled meeting."""
+        meeting = self.get_object()
+        event, err = create_meet_event(
+            request.user,
+            meeting.title,
+            meeting.description,
+            start_time=meeting.start_time,
+            end_time=meeting.end_time,
+        )
+        if not event:
+            if err == 'no_token':
+                return Response({'error': 'Failed to create Google Meet. Connect Google Calendar in Settings first.'}, status=400)
+            return Response({'error': f'Google Calendar API error: {err}. Make sure the Google Calendar API is enabled in your Google Cloud project.'}, status=400)
+
+        meet_link = ''
+        if event.get('conferenceData') and event['conferenceData'].get('entryPoints'):
+            for entry in event['conferenceData']['entryPoints']:
+                if entry.get('entryPointType') == 'video':
+                    meet_link = entry.get('uri', '')
+                    break
+
+        meeting.meeting_url = meet_link
+        meeting.google_event_id = event.get('id')
+        meeting.save()
+
+        return Response({
+            'meeting_url': meet_link,
+            'event_id': event.get('id'),
+            'html_link': event.get('htmlLink'),
+            'meeting': ScheduledMeetingSerializer(meeting).data,
+        })
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        meeting = self.get_object()
+        meeting.status = 'cancelled'
+        meeting.save()
+        return Response(ScheduledMeetingSerializer(meeting).data)
+
+    @action(detail=True, methods=['post'])
+    def complete(self, request, pk=None):
+        meeting = self.get_object()
+        meeting.status = 'completed'
+        meeting.save()
+        return Response(ScheduledMeetingSerializer(meeting).data)
+
+
+@api_view(['GET'])
+def notifications_list(request):
+    """Get notifications for the current user (matched via employee email)."""
+    if not request.user.is_authenticated:
+        return Response({'error': 'Not authenticated'}, status=401)
+
+    try:
+        employee = Employee.objects.get(email=request.user.email)
+    except Employee.DoesNotExist:
+        name = request.user.get_full_name() or request.user.username
+        employee = Employee.objects.create(name=name, email=request.user.email)
+
+    notifications = Notification.objects.filter(recipient=employee)
+    unread_count = notifications.filter(is_read=False).count()
+    return Response({
+        'notifications': NotificationSerializer(notifications, many=True).data,
+        'unread_count': unread_count,
+    })
+
+
+@api_view(['POST'])
+def notifications_mark_read(request):
+    """Mark notifications as read."""
+    if not request.user.is_authenticated:
+        return Response({'error': 'Not authenticated'}, status=401)
+
+    notification_ids = request.data.get('ids', [])
+    if notification_ids:
+        Notification.objects.filter(id__in=notification_ids).update(is_read=True)
+    else:
+        try:
+            employee = Employee.objects.get(email=request.user.email)
+            Notification.objects.filter(recipient=employee, is_read=False).update(is_read=True)
+        except Employee.DoesNotExist:
+            pass
+
+    return Response({'status': 'ok'})
