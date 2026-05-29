@@ -75,14 +75,14 @@ ACCOUNT_EMAIL_VERIFICATION = 'none'
 ACCOUNT_LOGIN_METHODS = {'email', 'username'}
 SOCIALACCOUNT_AUTO_SIGNUP = True
 SOCIALACCOUNT_LOGIN_ON_GET = True
-SESSION_COOKIE_SAMESITE = 'None'
+SESSION_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_HTTPONLY = True
 _csrf_origins = os.getenv('CSRF_TRUSTED_ORIGINS', 'https://management-be-eight.vercel.app,https://management-f-e.vercel.app,http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8000').split(',')
 if 'https://management-be-eight.vercel.app' not in _csrf_origins:
     _csrf_origins.append('https://management-be-eight.vercel.app')
 CSRF_TRUSTED_ORIGINS = _csrf_origins
-CSRF_COOKIE_SAMESITE = 'None'
+CSRF_COOKIE_SAMESITE = 'Lax'
 CSRF_COOKIE_SECURE = not DEBUG
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
