@@ -22,7 +22,7 @@ import requests as http_requests
 from .models import Employee, Meeting, Task, FathomConfig, Comment, GoogleCalendarToken, ScheduledMeeting, Notification
 from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, FathomWebhookSerializer, CommentSerializer, GoogleCalendarTokenSerializer, ScheduledMeetingSerializer, NotificationSerializer
 from .services import sync_meetings, process_webhook_payload, get_config, get_user_fathom_token, fathom_headers, FATHOM_API_BASE
-from .google_calendar import (create_meet_event, list_upcoming_events, sync_calendar_events, get_google_calendar_auth_url, get_google_calendar_credentials)
+from .google_calendar import (create_meet_event, list_upcoming_events, sync_calendar_events, get_google_calendar_auth_url, get_google_calendar_credentials, resolve_calendar_state)
 from urllib.parse import urlencode
 
 class EmployeeViewSet(viewsets.ModelViewSet):
@@ -600,8 +600,15 @@ def google_calendar_oauth_callback(request):
     if not code:
         return HttpResponseRedirect(f'{frontend_url}/settings?calendar_error=missing_code')
 
-    if not request.user.is_authenticated:
-        return HttpResponseRedirect(f'{frontend_url}/login?calendar_error=not_authenticated')
+    state = request.GET.get('state', '')
+    user_pk = resolve_calendar_state(state)
+    if not user_pk:
+        return HttpResponseRedirect(f'{frontend_url}/login?calendar_error=invalid_state')
+
+    try:
+        user = User.objects.get(pk=user_pk)
+    except User.DoesNotExist:
+        return HttpResponseRedirect(f'{frontend_url}/login?calendar_error=user_not_found')
 
     client_id = settings.GOOGLE_CLIENT_ID
     client_secret = settings.GOOGLE_CLIENT_SECRET
@@ -627,7 +634,7 @@ def google_calendar_oauth_callback(request):
     expires_in = tokens.get('expires_in', 3600)
 
     GoogleCalendarToken.objects.update_or_create(
-        user=request.user,
+        user=user,
         defaults={
             'access_token': access_token,
             'refresh_token': refresh_token,

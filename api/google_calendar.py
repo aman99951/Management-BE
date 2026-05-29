@@ -265,6 +265,9 @@ def create_meeting_from_event(user, event):
 
 
 from urllib.parse import urlencode
+from django.core.signing import Signer
+
+_calendar_signer = Signer()
 
 
 def get_google_calendar_auth_url(request):
@@ -273,6 +276,8 @@ def get_google_calendar_auth_url(request):
     redirect_uri = request.build_absolute_uri("/api/google-calendar/oauth/callback/")
     scope_str = " ".join(SCOPES)
 
+    state_data = _calendar_signer.sign(str(request.user.pk))
+
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -280,7 +285,17 @@ def get_google_calendar_auth_url(request):
         "scope": scope_str,
         "access_type": "offline",
         "prompt": "consent",
-        "state": "google_calendar",
+        "state": state_data,
     }
     url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
     return url
+
+
+def resolve_calendar_state(state):
+    """Extract the user PK from the signed state parameter."""
+    from django.core.signing import BadSignature
+    try:
+        value = _calendar_signer.unsign(state)
+        return int(value)
+    except (BadSignature, ValueError, TypeError):
+        return None
