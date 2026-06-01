@@ -775,10 +775,10 @@ class ScheduledMeetingViewSet(viewsets.ModelViewSet):
     serializer_class = ScheduledMeetingSerializer
 
     def get_queryset(self):
-        return ScheduledMeeting.objects.filter(created_by=self.request.user)
+        return ScheduledMeeting.objects.all()
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save()
 
     @action(detail=True, methods=['post'])
     def invite(self, request, pk=None):
