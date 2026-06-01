@@ -58,10 +58,7 @@ class MeetingViewSet(viewsets.ModelViewSet):
     def generate_tasks(self, request, pk=None):
         meeting = self.get_object()
 
-        existing = Task.objects.filter(meeting=meeting, source='ai')
-        if existing.exists():
-            from .serializers import TaskSerializer
-            return Response({'status': 'exists', 'tasks': TaskSerializer(existing, many=True).data})
+        Task.objects.filter(meeting=meeting, source='ai').delete()
 
         transcript_text = ''
         if meeting.transcript:
@@ -85,7 +82,6 @@ class MeetingViewSet(viewsets.ModelViewSet):
         if not ai_tasks or not isinstance(ai_tasks, list):
             return Response({'status': 'failed', 'error': f'AI returned no valid tasks. Model={settings.OPENROUTER_MODEL}, API key set={"yes" if settings.OPENROUTER_API_KEY else "no"}, input_len={len(input_text)}'}, status=500)
 
-        Task.objects.filter(meeting=meeting).delete()
         meeting_date = meeting.recorded_at or meeting.created_at
         for t in ai_tasks:
             title = (t.get('title') or 'Untitled Task')[:500]

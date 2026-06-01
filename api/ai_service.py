@@ -27,9 +27,9 @@ def generate_tasks_from_summary(summary_text, meeting_title):
 - priority: one of "low", "medium", "high", "critical"
 
 Rules:
-- Create one task per person. If a person has multiple action items, combine them into ONE task with all items in the description.
-- Every person who receives a task or action item MUST get their own task entry.
-- Do NOT skip anyone. If someone's name appears with an action item, include them.
+- Create ONE task per action item. If a person has multiple action items, create a separate task for EACH one.
+- Every distinct action item mentioned MUST be its own task entry — do NOT combine them.
+- Do NOT skip anyone or any action item. If someone's name appears with an action item, include them.
 - Return a JSON array of task objects.
 - Return ONLY the JSON array, no other text.
 
