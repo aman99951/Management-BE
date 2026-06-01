@@ -775,7 +775,7 @@ class ScheduledMeetingViewSet(viewsets.ModelViewSet):
         return ScheduledMeeting.objects.all()
 
     def perform_create(self, serializer):
-        serializer.save()
+        serializer.save(created_by=self.request.user)
 
     @action(detail=True, methods=['post'])
     def invite(self, request, pk=None):
