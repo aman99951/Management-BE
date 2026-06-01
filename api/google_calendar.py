@@ -13,11 +13,17 @@ SCOPES = [
 ]
 
 
-def get_google_calendar_credentials(user):
-    """Retrieve a valid access token for the user, refreshing if needed."""
-    try:
-        token_obj = GoogleCalendarToken.objects.get(user=user)
-    except GoogleCalendarToken.DoesNotExist:
+def get_google_calendar_credentials(user=None):
+    """Retrieve a valid access token, trying specific user first then any token."""
+    token_obj = None
+    if user:
+        try:
+            token_obj = GoogleCalendarToken.objects.get(user=user)
+        except GoogleCalendarToken.DoesNotExist:
+            pass
+    if not token_obj:
+        token_obj = GoogleCalendarToken.objects.first()
+    if not token_obj:
         return None
 
     # Check if token is expired and refresh if possible

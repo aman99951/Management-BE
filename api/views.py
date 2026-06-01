@@ -405,7 +405,7 @@ def auth_session(request):
     if not request.user.is_authenticated:
         return Response({'authenticated': False})
     fathom_token = get_user_fathom_token(request.user)
-    gc_connected = GoogleCalendarToken.objects.filter(user=request.user).exists()
+    gc_connected = GoogleCalendarToken.objects.exists()
     return Response({
         'authenticated': True,
         'user': {
@@ -563,14 +563,11 @@ def generate_ai_tasks(request):
 
 @api_view(['GET'])
 def google_calendar_status(request):
-    """Check if the user has connected their Google Calendar."""
-    if not request.user.is_authenticated:
-        return Response({'connected': False})
-    try:
-        token = GoogleCalendarToken.objects.get(user=request.user)
+    """Check if Google Calendar is connected (any user)."""
+    token = GoogleCalendarToken.objects.first()
+    if token:
         return Response({'connected': True, 'has_refresh_token': bool(token.refresh_token)})
-    except GoogleCalendarToken.DoesNotExist:
-        return Response({'connected': False})
+    return Response({'connected': False})
 
 
 @api_view(['GET'])
