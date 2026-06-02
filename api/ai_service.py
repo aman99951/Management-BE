@@ -6,39 +6,43 @@ from django.conf import settings
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-MAX_INPUT_CHARS = 8000
+MAX_INPUT_CHARS = 50000
 
-def generate_tasks_from_summary(summary_text, meeting_title):
+def generate_tasks_from_summary(transcript_text, meeting_title):
     api_key = settings.OPENROUTER_API_KEY
     if not api_key:
         print("OPENROUTER_API_KEY is not set", file=sys.stderr)
         return None
 
     model = settings.OPENROUTER_MODEL
-    print(f"Calling OpenRouter model={model} input_len={len(summary_text)}", file=sys.stderr)
+    print(f"Calling OpenRouter model={model} input_len={len(transcript_text)}", file=sys.stderr)
 
-    if len(summary_text) > MAX_INPUT_CHARS:
-        summary_text = summary_text[:MAX_INPUT_CHARS] + "\n\n[Note: transcript truncated due to length]"
+    if len(transcript_text) > MAX_INPUT_CHARS:
+        transcript_text = transcript_text[:MAX_INPUT_CHARS] + "\n\n[Note: transcript truncated due to length]"
 
-    prompt = f"""You are a task extraction assistant. Extract ALL action items and tasks for EVERY person mentioned in this meeting transcript. For each task determine:
-- title: a concise title (max 100 chars)
-- description: the full task details
-- assignee: the person responsible (full name exactly as written, or null if unclear)
-- priority: one of "low", "medium", "high", "critical"
+    prompt = f"""You are a meticulous task extraction assistant. Extract EVERY single action item and task for EVERY person in this transcript. Leave NOTHING out.
 
-Rules:
-- Create ONE task per UNIQUE action item. If the same action item or task is mentioned multiple times (duplicate meaning), combine them into ONE task.
-- If a person has multiple genuinely different action items, create a separate task for EACH distinct one.
-- Do NOT create duplicate tasks with the same or near-identical meaning — detect and merge duplicates.
-- Every distinct action item MUST be captured, but duplicates should be consolidated.
-- Do NOT skip anyone or any action item. If someone's name appears with an action item, include them.
-- Return a JSON array of task objects.
-- Return ONLY the JSON array, no other text.
+For each task provide:
+- title: concise title (max 100 chars)
+- description: full task details with context
+- assignee: the person responsible — use their name EXACTLY as spoken in the transcript
+- priority: "low", "medium", "high", or "critical"
+
+ABSOLUTE RULES — FOLLOW THESE WITHOUT EXCEPTION:
+1. Scan the ENTIRE transcript line by line. Every time someone is told to do something, that is a task.
+2. Capture tasks EVEN if they seem small, obvious, or were already implied.
+3. Pay close attention when the boss or manager assigns work — that person is the assignee.
+4. If the same person has multiple tasks, create a SEPARATE task for EACH one.
+5. Only merge two tasks if they are WORD-FOR-WORD identical in meaning.
+6. Do NOT skip anyone. If their name appears with a responsibility, include them.
+7. When unsure about assignee, use null rather than omit the task.
+8. Include tasks from quick asides, follow-ups, and assumed handoffs.
+9. Return ONLY a valid JSON array of task objects — no commentary.
 
 Meeting: {meeting_title}
 
 Transcript:
-{summary_text}"""
+{transcript_text}"""
 
     import time
     for attempt in range(2):
@@ -53,8 +57,8 @@ Transcript:
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                    "max_tokens": 2048,
+                    "temperature": 0.4,
+                    "max_tokens": 8192,
                 },
                 timeout=30,
             )

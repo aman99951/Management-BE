@@ -68,8 +68,6 @@ class MeetingViewSet(viewsets.ModelViewSet):
                 transcript_text += f"{speaker}: {text}\n"
 
         input_text = f"Meeting Title: {meeting.title}\n\n"
-        if meeting.summary:
-            input_text += f"Summary:\n{meeting.summary}\n\n"
         if transcript_text:
             input_text += f"Transcript:\n{transcript_text}\n"
 
@@ -91,7 +89,10 @@ class MeetingViewSet(viewsets.ModelViewSet):
             assignee_name = t.get('assignee')
             employee = None
             if assignee_name:
-                employee = Employee.objects.filter(name__iexact=assignee_name.strip()).first()
+                name = assignee_name.strip()
+                employee = Employee.objects.filter(name__iexact=name).first()
+                if not employee:
+                    employee = Employee.objects.filter(name__icontains=name).first()
             priority = t.get('priority', 'medium')
             if priority not in dict(Task.PRIORITY_CHOICES):
                 priority = 'medium'
@@ -525,11 +526,20 @@ def generate_ai_tasks(request):
         return JsonResponse({'error': 'OpenRouter API key not configured. Set OPENROUTER_API_KEY in backend settings.'}, status=400)
 
     total = 0
-    meetings = Meeting.objects.exclude(summary='').exclude(summary__isnull=True)
+    meetings = Meeting.objects.exclude(transcript__isnull=True).exclude(transcript=[])
     for meeting in meetings:
         if Task.objects.filter(meeting=meeting, source='ai').exists():
             continue
-        ai_tasks = generate_tasks_from_summary(meeting.summary, meeting.title)
+        transcript_text = ''
+        if meeting.transcript:
+            for entry in meeting.transcript:
+                speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
+                text = entry.get('text', '')
+                transcript_text += f"{speaker}: {text}\n"
+        input_text = f"Meeting Title: {meeting.title}\n\n"
+        if transcript_text:
+            input_text += f"Transcript:\n{transcript_text}\n"
+        ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
         if not ai_tasks or not isinstance(ai_tasks, list):
             continue
         meeting_date = meeting.recorded_at or meeting.created_at
@@ -541,7 +551,10 @@ def generate_ai_tasks(request):
             assignee_name = t.get('assignee')
             employee = None
             if assignee_name:
-                employee = Employee.objects.filter(name__iexact=assignee_name.strip()).first()
+                name = assignee_name.strip()
+                employee = Employee.objects.filter(name__iexact=name).first()
+                if not employee:
+                    employee = Employee.objects.filter(name__icontains=name).first()
             priority = t.get('priority', 'medium')
             if priority not in dict(Task.PRIORITY_CHOICES):
                 priority = 'medium'
