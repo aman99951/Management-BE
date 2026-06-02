@@ -28,7 +28,7 @@ class GoogleCalendarTokenSerializer(serializers.ModelSerializer):
         return bool(obj.access_token)
 
 class CommentSerializer(serializers.ModelSerializer):
-    author_name = serializers.CharField(source='author.name', read_only=True, default=None)
+    author_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Comment
@@ -37,6 +37,9 @@ class CommentSerializer(serializers.ModelSerializer):
             'task': {'required': False},
             'created_at': {'required': False},
         }
+
+    def get_author_name(self, obj):
+        return obj.author.name if obj.author else None
 
 class TaskSerializer(serializers.ModelSerializer):
     assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True, default=None)
