@@ -136,8 +136,9 @@ class TaskViewSet(viewsets.ModelViewSet):
         if serializer.is_valid():
             author = None
             if request.user.is_authenticated:
+                email = request.user.email or ''
                 name = request.user.get_full_name() or request.user.username
-                author, _ = Employee.objects.get_or_create(name=name, defaults={'email': request.user.email or ''})
+                author, _ = Employee.objects.get_or_create(email=email, defaults={'name': name})
             serializer.save(task=task, author=author)
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
