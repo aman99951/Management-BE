@@ -94,7 +94,8 @@ def fetch_meetings_from_fathom_by_title(title):
 def sync_meetings():
     data = fetch_meetings()
     if not data:
-        return 0
+        return [], 0
+    new_meetings = []
     count = 0
     for item in data.get("items", []):
         transcript = item.get("transcript")
@@ -119,8 +120,9 @@ def sync_meetings():
             },
         )
         if created:
+            new_meetings.append(meeting)
             count += 1
-    return count
+    return new_meetings, count
 
 def _process_action_items(fathom_data, meeting):
     action_items = fathom_data.get("action_items", [])
@@ -204,7 +206,7 @@ def process_webhook_payload(payload):
         },
     )
 
-    return meeting
+    return meeting, created
 
 def get_user_fathom_token(user):
     try:

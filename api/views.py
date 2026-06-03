@@ -30,7 +30,7 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     serializer_class = EmployeeSerializer
 
 class MeetingViewSet(viewsets.ModelViewSet):
-    queryset = Meeting.objects.all()
+    queryset = Meeting.objects.all().order_by('-recorded_at', '-created_at')
     serializer_class = MeetingSerializer
 
     @action(detail=False, methods=['post'])
@@ -168,19 +168,97 @@ def fathom_config_view(request):
         config = FathomConfig.objects.create(**serializer.validated_data)
     return JsonResponse({'configured': True})
 
+def _auto_generate_tasks_for_meeting(meeting):
+    """Auto-generate AI tasks for a meeting. Skips meetings titled 'Fathom Demo'."""
+    title_lower = (meeting.title or '').lower().strip()
+    if 'fathom demo' in title_lower:
+        return 0
+
+    # Don't re-generate if AI tasks already exist
+    if Task.objects.filter(meeting=meeting, source='ai').exists():
+        return 0
+
+    # Need transcript or summary to generate tasks
+    if not meeting.transcript and not meeting.summary:
+        return 0
+
+    transcript_text = ''
+    if meeting.transcript:
+        for entry in meeting.transcript:
+            speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
+            text = entry.get('text', '')
+            transcript_text += f"{speaker}: {text}\n"
+
+    if not transcript_text and not meeting.summary:
+        return 0
+
+    input_text = f"Meeting Title: {meeting.title}\n\n"
+    if transcript_text:
+        input_text += f"Transcript:\n{transcript_text}\n"
+    elif meeting.summary:
+        input_text += f"Summary:\n{meeting.summary}\n"
+
+    if not settings.OPENROUTER_API_KEY:
+        return 0
+
+    from .ai_service import generate_tasks_from_summary
+    ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
+    if not ai_tasks or not isinstance(ai_tasks, list):
+        return 0
+
+    meeting_date = meeting.recorded_at or meeting.created_at
+    task_count = 0
+    for t in ai_tasks:
+        title = (t.get('title') or 'Untitled Task')[:500]
+        desc = t.get('description', '')
+        if isinstance(desc, list):
+            desc = '\n'.join(f'- {item}' for item in desc)
+        assignee_name = t.get('assignee')
+        employee = None
+        if assignee_name:
+            name = assignee_name.strip()
+            employee = Employee.objects.filter(name__iexact=name).first()
+            if not employee:
+                employee = Employee.objects.filter(name__icontains=name).first()
+        priority = t.get('priority', 'medium')
+        if priority not in dict(Task.PRIORITY_CHOICES):
+            priority = 'medium'
+        Task.objects.create(
+            title=title,
+            description=desc,
+            assigned_to=employee,
+            meeting=meeting,
+            status='pending',
+            priority=priority,
+            source='ai',
+            created_at=meeting_date,
+        )
+        task_count += 1
+
+    return task_count
+
+
 @csrf_exempt
 @require_POST
 def fathom_sync_view(request):
-    count = sync_meetings()
-    return JsonResponse({'synced': count})
+    new_meetings, count = sync_meetings()
+    # Auto-generate tasks for newly synced meetings
+    auto_generated = 0
+    for meeting in new_meetings:
+        auto_generated += _auto_generate_tasks_for_meeting(meeting)
+    return JsonResponse({'synced': count, 'auto_generated_tasks': auto_generated})
 
 @api_view(['POST'])
 def fathom_webhook_view(request):
     serializer = FathomWebhookSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=400)
-    meeting = process_webhook_payload(serializer.validated_data)
-    return Response({'meeting_id': meeting.id}, status=201)
+    meeting, created = process_webhook_payload(serializer.validated_data)
+    # Auto-generate tasks for newly webhook-created meetings
+    tasks_auto_generated = 0
+    if created:
+        tasks_auto_generated = _auto_generate_tasks_for_meeting(meeting)
+    return Response({'meeting_id': meeting.id, 'created': created, 'auto_generated_tasks': tasks_auto_generated}, status=201)
 
 @api_view(['GET'])
 def dashboard_stats(request):
