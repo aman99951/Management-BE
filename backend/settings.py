@@ -168,8 +168,27 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'https://management-f-e.vercel.app,http://localhost:5173,http://localhost:8000,http://127.0.0.1:5173,http://127.0.0.1:8000').split(',')
+# Dynamically build CORS origins from env, ensuring FRONTEND_URL is always included
+_cors_from_env = os.getenv('CORS_ALLOWED_ORIGINS', '')
+_frontend_url = os.getenv('FRONTEND_URL', 'https://management-f-e.vercel.app')
+_default_origins = [
+    _frontend_url,
+    'https://management-f-e.vercel.app',
+    'http://localhost:5173',
+    'http://localhost:8000',
+    'http://127.0.0.1:5173',
+    'http://127.0.0.1:8000',
+]
+if _cors_from_env:
+    _cors_origins = [o.strip() for o in _cors_from_env.split(',') if o.strip()]
+    if _frontend_url not in _cors_origins:
+        _cors_origins.append(_frontend_url)
+    CORS_ALLOWED_ORIGINS = _cors_origins
+else:
+    CORS_ALLOWED_ORIGINS = _default_origins
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS']
+CORS_ALLOW_HEADERS = ['*']
 
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')

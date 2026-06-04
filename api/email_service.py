@@ -181,6 +181,71 @@ def send_task_assignment_email(task):
     )
 
 
+def send_batch_tasks_email(tasks):
+    """Send a single consolidated email with all tasks for an employee.
+    Groups tasks by employee and sends one email per employee."""
+    # Group tasks by employee
+    grouped = {}
+    for task in tasks:
+        if not task.assigned_to or not task.assigned_to.email:
+            continue
+        emp = task.assigned_to
+        grouped.setdefault(emp.id, {'employee': emp, 'tasks': []})
+        grouped[emp.id]['tasks'].append(task)
+
+    PRIORITY_ORDER = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+    sent_count = 0
+
+    for entry in grouped.values():
+        emp = entry['employee']
+        emp_tasks = sorted(entry['tasks'], key=lambda t: PRIORITY_ORDER.get(t.priority, 99))
+
+        task_list = []
+        for t in emp_tasks:
+            desc = t.description or ''
+            task_list.append({
+                'title': t.title,
+                'description_short': desc[:200] + ('…' if len(desc) > 200 else ''),
+                'priority': t.priority,
+                'status': t.status,
+                'meeting_title': t.meeting.title if t.meeting else None,
+            })
+
+        context = {
+            'employee_name': emp.name,
+            'tasks': task_list,
+            'frontend_url': _get_frontend_url(),
+        }
+
+        html_body = render_to_string('email/tasks_batch.html', context)
+
+        text_lines = [
+            f"Hi {emp.name},",
+            "",
+            f"You have {len(emp_tasks)} new task{'s' if len(emp_tasks) != 1 else ''}:",
+            "",
+        ]
+        for t in emp_tasks:
+            meeting_ref = f"(from: {t.meeting.title})" if t.meeting else None
+            text_lines.append(f"- [{t.priority.upper()}] {t.title}")
+            if meeting_ref:
+                text_lines.append(f"  {meeting_ref}")
+        text_lines.append("")
+        text_lines.append("View full details on the dashboard.")
+        text_body = '\n'.join(text_lines)
+
+        result = send_email(
+            to_email=emp.email,
+            subject=f"📋 {len(emp_tasks)} New Task{'s' if len(emp_tasks) != 1 else ''} for You",
+            html_body=html_body,
+            text_body=text_body,
+        )
+        if result:
+            sent_count += 1
+
+    return sent_count
+
+
 # ── Meeting Emails ──
 
 def send_meeting_invitation(employee, meeting):

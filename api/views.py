@@ -21,19 +21,14 @@ from django.utils import timezone
 import requests as http_requests
 from .models import Employee, Meeting, Task, FathomConfig, Comment, GoogleCalendarToken, ScheduledMeeting, Notification
 from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, FathomWebhookSerializer, CommentSerializer, GoogleCalendarTokenSerializer, ScheduledMeetingSerializer, NotificationSerializer
-from .email_service import send_action_items_to_assignees, send_meeting_invitation, send_meeting_created_notification, send_task_assignment_email
+from .email_service import send_action_items_to_assignees, send_meeting_invitation, send_meeting_created_notification, send_task_assignment_email, send_batch_tasks_email
 
 
 def _notify_task_assignees(tasks):
-    """Send assignment notification emails for all tasks that have an assignee.
+    """Send a single consolidated email per employee with all their tasks grouped.
     Called automatically after task generation.
     """
-    sent_count = 0
-    for task in tasks:
-        if task.assigned_to and task.assigned_to.email:
-            if send_task_assignment_email(task):
-                sent_count += 1
-    return sent_count
+    return send_batch_tasks_email(tasks)
 from .services import sync_meetings, process_webhook_payload, get_config, get_user_fathom_token, fathom_headers, FATHOM_API_BASE
 from .google_calendar import (create_meet_event, list_upcoming_events, sync_calendar_events, get_google_calendar_auth_url, get_google_calendar_credentials, resolve_calendar_state)
 from urllib.parse import urlencode
@@ -277,7 +272,7 @@ def _auto_generate_tasks_for_meeting(meeting):
         return 0
 
     meeting_date = meeting.recorded_at or meeting.created_at
-    task_count = 0
+    created_tasks = []
     for t in ai_tasks:
         title = (t.get('title') or 'Untitled Task')[:500]
         desc = t.get('description', '')
@@ -303,12 +298,12 @@ def _auto_generate_tasks_for_meeting(meeting):
             source='ai',
             created_at=meeting_date,
         )
-        # Auto-send assignment email
-        if employee and employee.email:
-            send_task_assignment_email(new_task)
-        task_count += 1
+        created_tasks.append(new_task)
 
-    return task_count
+    # Send one consolidated email per employee
+    send_batch_tasks_email(created_tasks)
+
+    return len(created_tasks)
 
 
 @csrf_exempt
@@ -688,6 +683,7 @@ def generate_ai_tasks(request):
         return JsonResponse({'error': 'OpenRouter API key not configured. Set OPENROUTER_API_KEY in backend settings.'}, status=400)
 
     total = 0
+    all_new_tasks = []
     meetings = Meeting.objects.exclude(transcript__isnull=True).exclude(transcript=[])
     for meeting in meetings:
         if Task.objects.filter(meeting=meeting, source='ai').exists():
@@ -730,10 +726,12 @@ def generate_ai_tasks(request):
                 source='ai',
                 created_at=meeting_date,
             )
-            # Auto-send assignment email
-            if employee and employee.email:
-                send_task_assignment_email(new_task)
+            all_new_tasks.append(new_task)
             total += 1
+
+    # Send one consolidated email per employee
+    if all_new_tasks:
+        send_batch_tasks_email(all_new_tasks)
 
     return JsonResponse({'status': 'completed', 'tasks_created': total, 'message': f'{total} AI tasks generated across all meetings.'})
 

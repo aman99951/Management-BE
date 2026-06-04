@@ -1,0 +1,46 @@
+{% extends "email/base_email.html" %}
+
+{% block header_title %}📋 Your New Tasks{% endblock %}
+{% block header_subtitle %}Tasks generated from your recent meetings{% endblock %}
+
+{% block body %}
+  <p style="color:#c0c0c0; font-size:14px; margin:0 0 16px 0;">
+    Hi <strong style="color:#e0e0e0;">{{ employee_name }}</strong>,
+  </p>
+
+  <p style="color:#aaa; font-size:13px; margin:0 0 20px 0;">
+    You have <strong style="color:#d4a017;">{{ tasks|length }} new task{{ tasks|length|pluralize }}</strong> to review:
+  </p>
+
+  {% for task in tasks %}
+    <div style="background:#1a1a1e; border:1px solid #2a2a30; border-radius:10px; padding:14px 16px; margin-bottom:12px;">
+      <p style="color:#e0e0e0; font-size:14px; font-weight:600; margin:0 0 4px 0;">
+        {{ task.title }}
+      </p>
+      {% if task.description_short %}
+        <p style="color:#999; font-size:12px; margin:0 0 6px 0;">{{ task.description_short }}</p>
+      {% endif %}
+      <div style="display:flex; flex-wrap:wrap; gap:8px; font-size:11px; color:#888;">
+        <span style="background:#2a2a30; padding:2px 8px; border-radius:4px;">
+          Priority: <strong style="color:
+            {% if task.priority == 'critical' %}#ff4444
+            {% elif task.priority == 'high' %}#ff8800
+            {% elif task.priority == 'medium' %}#d4a017
+            {% else %}#888
+            {% endif %}">{{ task.priority|title }}</strong>
+        </span>
+        {% if task.meeting_title %}
+          <span style="background:#2a2a30; padding:2px 8px; border-radius:4px;">
+            Meeting: {{ task.meeting_title }}
+          </span>
+        {% endif %}
+      </div>
+    </div>
+  {% endfor %}
+
+  <p style="color:#888; font-size:12px; margin:20px 0 0 0;">
+    <a href="{{ frontend_url }}/tasks" style="color:#d4a017; text-decoration:none; font-weight:600;">
+      View all tasks on dashboard →
+    </a>
+  </p>
+{% endblock %}
