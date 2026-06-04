@@ -58,6 +58,15 @@ class MeetingViewSet(viewsets.ModelViewSet):
         )
         return Response(MeetingSerializer(meeting).data, status=201)
 
+    @action(detail=False, methods=['post'])
+    def batch_generate_tasks(self, request):
+        """Auto-generate AI tasks for all meetings that have transcripts/summaries but no tasks yet."""
+        total = 0
+        for meeting in Meeting.objects.all():
+            count = _auto_generate_tasks_for_meeting(meeting)
+            total += count
+        return Response({'total_generated': total})
+
     @action(detail=True, methods=['post'])
     def check_fathom(self, request, pk=None):
         meeting = self.get_object()
