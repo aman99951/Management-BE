@@ -21,6 +21,19 @@ from django.utils import timezone
 import requests as http_requests
 from .models import Employee, Meeting, Task, FathomConfig, Comment, GoogleCalendarToken, ScheduledMeeting, Notification
 from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, FathomWebhookSerializer, CommentSerializer, GoogleCalendarTokenSerializer, ScheduledMeetingSerializer, NotificationSerializer
+from .email_service import send_action_items_to_assignees, send_meeting_invitation, send_meeting_created_notification, send_task_assignment_email
+
+
+def _notify_task_assignees(tasks):
+    """Send assignment notification emails for all tasks that have an assignee.
+    Called automatically after task generation.
+    """
+    sent_count = 0
+    for task in tasks:
+        if task.assigned_to and task.assigned_to.email:
+            if send_task_assignment_email(task):
+                sent_count += 1
+    return sent_count
 from .services import sync_meetings, process_webhook_payload, get_config, get_user_fathom_token, fathom_headers, FATHOM_API_BASE
 from .google_calendar import (create_meet_event, list_upcoming_events, sync_calendar_events, get_google_calendar_auth_url, get_google_calendar_credentials, resolve_calendar_state)
 from urllib.parse import urlencode
@@ -107,8 +120,16 @@ class MeetingViewSet(viewsets.ModelViewSet):
                 created_at=meeting_date,
             )
 
+        # Auto-send assignment emails to assignees
+        created_tasks = Task.objects.filter(meeting=meeting, source='ai')
+        emailed = _notify_task_assignees(created_tasks)
+
         from .serializers import TaskSerializer
-        return Response({'status': 'created', 'tasks': TaskSerializer(Task.objects.filter(meeting=meeting), many=True).data})
+        return Response({
+            'status': 'created',
+            'tasks': TaskSerializer(created_tasks, many=True).data,
+            'emails_sent': emailed,
+        })
 
 class TaskViewSet(viewsets.ModelViewSet):
     queryset = Task.objects.all()
@@ -116,6 +137,46 @@ class TaskViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(source='manual')
+
+    @action(detail=False, methods=['post'])
+    def send_action_items(self, request):
+        """Send action items emails to assignees.
+
+        Request body:
+            priority: Optional — filter by priority ('critical', 'high', 'medium', 'low', 'all')
+            status: Optional — filter by status ('pending', 'open' for pending+in_progress)
+        """
+        priority = request.data.get('priority', 'all')
+        status = request.data.get('status', 'pending')
+
+        results = send_action_items_to_assignees(
+            priority_filter=priority,
+            status_filter=status,
+        )
+
+        total_sent = sum(1 for r in results if r['sent'])
+        total_failed = sum(1 for r in results if not r['sent'])
+        total_tasks = sum(r['task_count'] for r in results)
+
+        return Response({
+            'status': 'completed',
+            'total_employees_contacted': len(results),
+            'total_emails_sent': total_sent,
+            'total_emails_failed': total_failed,
+            'total_tasks_included': total_tasks,
+            'details': results,
+        })
+
+    @action(detail=True, methods=['post'])
+    def send_assignment_email(self, request, pk=None):
+        """Send an assignment notification email for this task."""
+        task = self.get_object()
+        if not task.assigned_to:
+            return Response({'error': 'Task has no assignee'}, status=400)
+        sent = send_task_assignment_email(task)
+        if sent:
+            return Response({'status': 'sent', 'to': task.assigned_to.email, 'task': task.title})
+        return Response({'error': 'Failed to send email'}, status=500)
 
     @action(detail=True, methods=['patch'])
     def status(self, request, pk=None):
@@ -223,7 +284,7 @@ def _auto_generate_tasks_for_meeting(meeting):
         priority = t.get('priority', 'medium')
         if priority not in dict(Task.PRIORITY_CHOICES):
             priority = 'medium'
-        Task.objects.create(
+        new_task = Task.objects.create(
             title=title,
             description=desc,
             assigned_to=employee,
@@ -233,6 +294,9 @@ def _auto_generate_tasks_for_meeting(meeting):
             source='ai',
             created_at=meeting_date,
         )
+        # Auto-send assignment email
+        if employee and employee.email:
+            send_task_assignment_email(new_task)
         task_count += 1
 
     return task_count
@@ -404,7 +468,18 @@ def google_oauth_callback(request):
     client_id = settings.GOOGLE_CLIENT_ID
     client_secret = settings.GOOGLE_CLIENT_SECRET
     if not client_id or not client_secret:
-        return HttpResponseRedirect(f'{frontend_url}/login?error=missing_oauth_config')
+        # Fall back to SocialApp stored in the database
+        try:
+            from allauth.socialaccount.models import SocialApp
+            app = SocialApp.objects.get(provider='google', sites__id=settings.SITE_ID)
+            if not client_id:
+                client_id = app.client_id
+            if not client_secret:
+                client_secret = app.secret
+        except (SocialApp.DoesNotExist, ImportError):
+            pass
+        if not client_id or not client_secret:
+            return HttpResponseRedirect(f'{frontend_url}/login?error=missing_oauth_config')
     token_resp = http_requests.post('https://oauth2.googleapis.com/token', data={
         'code': code,
         'client_id': client_id,
@@ -636,7 +711,7 @@ def generate_ai_tasks(request):
             priority = t.get('priority', 'medium')
             if priority not in dict(Task.PRIORITY_CHOICES):
                 priority = 'medium'
-            Task.objects.create(
+            new_task = Task.objects.create(
                 title=title,
                 description=desc,
                 assigned_to=employee,
@@ -646,6 +721,9 @@ def generate_ai_tasks(request):
                 source='ai',
                 created_at=meeting_date,
             )
+            # Auto-send assignment email
+            if employee and employee.email:
+                send_task_assignment_email(new_task)
             total += 1
 
     return JsonResponse({'status': 'completed', 'tasks_created': total, 'message': f'{total} AI tasks generated across all meetings.'})
@@ -867,7 +945,20 @@ class ScheduledMeetingViewSet(viewsets.ModelViewSet):
         return ScheduledMeeting.objects.all()
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        meeting = serializer.save(created_by=self.request.user)
+        # Send meeting creation emails to attendees if any were provided
+        if meeting.attendees.exists():
+            created_by_name = self.request.user.get_full_name() or self.request.user.username
+            for emp in meeting.attendees.all():
+                created = Notification.objects.get_or_create(
+                    recipient=emp,
+                    meeting=meeting,
+                    defaults={
+                        'title': f"New Meeting: {meeting.title}",
+                        'message': f"You've been added to '{meeting.title}' scheduled for {meeting.start_time.strftime('%b %d, %Y at %I:%M %p')}.",
+                    }
+                )
+                send_meeting_created_notification(emp, meeting, created_by_name)
 
     @action(detail=True, methods=['post'])
     def invite(self, request, pk=None):
@@ -880,6 +971,8 @@ class ScheduledMeetingViewSet(viewsets.ModelViewSet):
         meeting.attendees.add(*employees)
 
         created = []
+        email_sent = 0
+        email_failed = 0
         for emp in employees:
             notif, was_created = Notification.objects.get_or_create(
                 recipient=emp,
@@ -897,9 +990,18 @@ class ScheduledMeetingViewSet(viewsets.ModelViewSet):
             if was_created:
                 created.append(NotificationSerializer(notif).data)
 
+            # Also send a real email
+            sent = send_meeting_invitation(emp, meeting)
+            if sent:
+                email_sent += 1
+            else:
+                email_failed += 1
+
         return Response({
             'invited': len(employees),
             'notifications_created': len(created),
+            'emails_sent': email_sent,
+            'emails_failed': email_failed,
             'attendees': ScheduledMeetingSerializer(meeting).data['attendees_details'],
         })
 

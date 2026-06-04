@@ -1,0 +1,21 @@
+{% extends "email/base_email.html" %}
+
+{% block header_title %}🆕 New Meeting Created{% endblock %}
+{% block header_subtitle %}{% endblock %}
+
+{% block body %}
+  <p style="color:#c0c0c0; font-size:14px; margin:0 0 16px 0;">
+    Hi <strong style="color:#e0e0e0;">{{ employee_name }}</strong>,
+  </p>
+
+  <p style="color:#e0e0e0; font-size:16px; font-weight:600; margin:0;">{{ meeting_title }}</p>
+
+  <p style="color:#aaa; font-size:13px; margin:12px 0 0 0;">Created by {{ created_by_name }}</p>
+
+  <table cellpadding="0" cellspacing="0" style="background:#1e1e22; border-radius:12px; padding:14px 18px; width:100%; margin:16px 0 0 0;">
+    <tr>
+      <td style="padding:4px 0; color:#aaa; font-size:13px; width:80px;">📅 When</td>
+      <td style="padding:4px 0; color:#e0e0e0; font-size:13px; font-weight:600;">{{ date_str }} at {{ time_str }}</td>
+    </tr>
+  </table>
+{% endblock %}

@@ -1,0 +1,21 @@
+{% extends "email/base_email.html" %}
+
+{% block header_title %}📌 New Task Assigned{% endblock %}
+{% block header_subtitle %}{% endblock %}
+
+{% block body %}
+  <p style="color:#c0c0c0; font-size:14px; margin:0 0 16px 0;">
+    Hi <strong style="color:#e0e0e0;">{{ employee_name }}</strong>,
+  </p>
+
+  <p style="color:#e0e0e0; font-size:16px; font-weight:600; margin:0 0 8px 0;">{{ task_title }}</p>
+
+  {% if task_description %}
+    <p style="color:#aaa; font-size:13px; margin:0 0 12px 0;">{{ task_description }}</p>
+  {% endif %}
+
+  <p style="color:#888; font-size:12px; margin:0;">
+    Priority: <strong style="color:#d4a017;">{{ task_priority }}</strong>
+    {% if meeting_ref %} | {{ meeting_ref }}{% endif %}
+  </p>
+{% endblock %}

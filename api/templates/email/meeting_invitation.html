@@ -1,0 +1,42 @@
+{% extends "email/base_email.html" %}
+
+{% block header_title %}📅 Meeting Invitation{% endblock %}
+{% block header_subtitle %}{% endblock %}
+
+{% block body %}
+  <p style="color:#c0c0c0; font-size:14px; margin:0 0 20px 0;">
+    Hi <strong style="color:#e0e0e0;">{{ employee_name }}</strong>,
+  </p>
+
+  <p style="color:#e0e0e0; font-size:18px; font-weight:700; margin:0 0 4px 0;">{{ meeting_title }}</p>
+
+  {% if meeting_description %}
+    <p style="color:#aaa; font-size:13px; margin:0 0 16px 0;">{{ meeting_description }}</p>
+  {% endif %}
+
+  <table cellpadding="0" cellspacing="0" style="background:#1e1e22; border-radius:12px; padding:16px 20px; width:100%; margin:16px 0 0 0;">
+    <tr>
+      <td style="padding:6px 0; color:#aaa; font-size:13px; width:80px;">📅 Date</td>
+      <td style="padding:6px 0; color:#e0e0e0; font-size:14px; font-weight:600;">{{ date_str }}</td>
+    </tr>
+    <tr>
+      <td style="padding:6px 0; color:#aaa; font-size:13px;">⏰ Time</td>
+      <td style="padding:6px 0; color:#e0e0e0; font-size:14px; font-weight:600;">{{ time_str }} ({{ duration_min }} min)</td>
+    </tr>
+    {% if meeting_url %}
+    <tr>
+      <td style="padding:6px 0; color:#aaa; font-size:13px;">🔗 Link</td>
+      <td style="padding:6px 0; color:#e0e0e0; font-size:14px; font-weight:600;">
+        <a href="{{ meeting_url }}" style="color:#d4a017; text-decoration:none; font-weight:600;">Join via Google Meet</a>
+      </td>
+    </tr>
+    {% elif meeting_location %}
+    <tr>
+      <td style="padding:6px 0; color:#aaa; font-size:13px;">📍 Location</td>
+      <td style="padding:6px 0; color:#e0e0e0; font-size:14px; font-weight:600;">{{ meeting_location }}</td>
+    </tr>
+    {% endif %}
+  </table>
+
+  <p style="color:#888; font-size:13px; margin:20px 0 0 0;">You can view and manage this event in the dashboard.</p>
+{% endblock %}

@@ -1,0 +1,58 @@
+{% extends "email/base_email.html" %}
+
+{% block header_title %}📋 Your Action Items{% endblock %}
+{% block header_subtitle %}
+  <p style="margin:8px 0 0 0; color:rgba(255,255,255,0.85); font-size:14px;">Here are your assigned tasks</p>
+{% endblock %}
+
+{% block body %}
+  <p style="color:#c0c0c0; font-size:14px; margin:0 0 20px 0;">
+    Hi <strong style="color:#e0e0e0;">{{ employee_name }}</strong>, here is your list of open action items:
+  </p>
+
+  <table cellpadding="0" cellspacing="0" width="100%">
+    {% for task in tasks %}
+    <tr>
+      <td style="padding:12px 0; border-bottom:1px solid #333;">
+        <table cellpadding="0" cellspacing="0" width="100%">
+          <tr>
+            <td style="width:20px; vertical-align:top;">
+              <span style="font-size:18px;">
+                {% if task.priority == 'critical' %}🔴
+                {% elif task.priority == 'high' %}🟠
+                {% elif task.priority == 'medium' %}🟡
+                {% else %}🟢
+                {% endif %}
+              </span>
+            </td>
+            <td style="padding-left:10px;">
+              <p style="margin:0; font-weight:600; color:#e0e0e0; font-size:15px;">{{ task.title }}</p>
+              {% if task.description %}
+                <p style="color:#aaa; font-size:13px; margin:4px 0 0 0;">{{ task.description_short }}</p>
+              {% endif %}
+              <p style="margin:4px 0 0 0; font-size:12px; color:#aaa;">
+                <span style="background:#333; padding:2px 8px; border-radius:4px;">
+                  {% if task.status == 'pending' %}🟡 Pending
+                  {% elif task.status == 'in_progress' %}🔵 In Progress
+                  {% else %}✅ Completed
+                  {% endif %}
+                </span>
+                <span style="background:#333; padding:2px 8px; border-radius:4px;">
+                  {% if task.priority == 'critical' %}Critical
+                  {% elif task.priority == 'high' %}High
+                  {% elif task.priority == 'medium' %}Medium
+                  {% else %}Low
+                  {% endif %}
+                </span>
+                {% if task.meeting_title %}
+                  <em style="color:#888;">from meeting: {{ task.meeting_title }}</em>
+                {% endif %}
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+{% endblock %}
