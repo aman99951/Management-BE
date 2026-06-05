@@ -24,7 +24,7 @@ def generate_tasks_from_summary(transcript_text, meeting_title):
 
 For each task provide:
 - title: concise title (max 100 chars) — GENERATE THIS FROM the description, DO NOT leave it blank or "Untitled"
-- description: clear, professional English summary of what needs to be done — DO NOT quote the transcript, just explain the task concisely
+- description: detailed summary of what exactly needs to be done — include ALL specific requirements, features, deadlines, integrations, or action points the assigner (Sekar, Mani Gajendran, or anyone) mentioned. Write in clear English, but capture every concrete detail from the discussion. Do NOT be generic; be as specific as the transcript is.
 - assignee: the person responsible — use their FULL name EXACTLY as it appears in the transcript speaker labels (e.g., "Sekar D", "karan kumar", "Avinesh Duraimanickam", "Praveen G")
 - priority: "low", "medium", "high", or "critical"
 
