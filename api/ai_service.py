@@ -24,7 +24,7 @@ def generate_tasks_from_summary(transcript_text, meeting_title):
 
 For each task provide:
 - title: concise title (max 100 chars) — GENERATE THIS FROM the description, DO NOT leave it blank or "Untitled"
-- description: specific task details quoting what was actually said
+- description: clear, professional English summary of what needs to be done — DO NOT quote the transcript, just explain the task concisely
 - assignee: the person responsible — use their FULL name EXACTLY as it appears in the transcript speaker labels (e.g., "Sekar D", "karan kumar", "Avinesh Duraimanickam", "Praveen G")
 - priority: "low", "medium", "high", or "critical"
 
@@ -33,10 +33,11 @@ CRITICAL RULES — FOLLOW THESE WITHOUT EXCEPTION:
 2. The assignee MUST be the person who WILL DO the work, not the person who assigned it.
 3. If someone says "I'll do X" or "I will X", that is a task for that person.
 4. If a manager tells someone "please do X", the assignee is the person told to do it.
-5. Do NOT create tasks from general discussion, brainstorming, or problem descriptions without a clear "who will do what".
-6. Use the speaker name EXACTLY as shown in the transcript (e.g., "Sekar D", "karan kumar", "Avinesh Duraimanickam").
-7. NEVER use null for assignee — if no one is clearly assigned, omit that item entirely.
-8. Return ONLY a valid JSON array of task objects — no commentary, no markdown.
+5. Sekar and Mani Gajendran are the managers/owners who delegate work. When they say "Praveen, do X" or "Karan, please handle Y", assignee is Praveen/Karan, NOT Sekar/Mani. Only assign a task to Sekar or Mani if they explicitly say "I will do it myself".
+6. Do NOT create tasks from general discussion, brainstorming, or problem descriptions without a clear "who will do what".
+7. Use the speaker name EXACTLY as shown in the transcript (e.g., "Sekar D", "karan kumar", "Avinesh Duraimanickam").
+8. NEVER use null for assignee — if no one is clearly assigned, omit that item entirely.
+9. Return ONLY a valid JSON array of task objects — no commentary, no markdown.
 
 Meeting: {meeting_title}
 
