@@ -24,6 +24,93 @@ from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, 
 from .email_service import send_action_items_to_assignees, send_meeting_invitation, send_meeting_created_notification, send_task_assignment_email, send_batch_tasks_email
 
 
+def _match_employee(assignee_name):
+    """Fuzzy-match an assignee name from AI against known employees.
+    Handles cases like 'Sekar D' → 'Sekar', 'Avinesh Duraimanickam' → 'Avinesh D'.
+    """
+    if not assignee_name:
+        return None
+    name = assignee_name.strip()
+    # 1. Exact match (case-insensitive)
+    emp = Employee.objects.filter(name__iexact=name).first()
+    if emp:
+        return emp
+    # 2. AI name contains employee name as a substring (e.g., 'Sekar D' contains 'Sekar')
+    emp = Employee.objects.filter(name__in=name.split()).first()
+    if emp:
+        return emp
+    # 3. Employee name is contained within AI name (e.g., 'Sekar' is inside 'Sekar D')
+    for emp in Employee.objects.all():
+        if emp.name.lower() in name.lower():
+            return emp
+    # 4. Any word from AI name matches any word from employee name
+    ai_words = set(name.lower().split())
+    for emp in Employee.objects.all():
+        emp_words = set(emp.name.lower().split())
+        if ai_words & emp_words:
+            return emp
+    return None
+
+
+def _generate_title_from_description(description):
+    """Generate a concise title from the first sentence of a description."""
+    if not description:
+        return 'Untitled Task'
+    # Take first sentence, limit to 100 chars
+    first_sentence = description.split('.')[0].strip()
+    if len(first_sentence) > 100:
+        first_sentence = first_sentence[:97] + '...'
+    return first_sentence if first_sentence else 'Untitled Task'
+
+
+def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date):
+    """Shared logic to create Task objects from AI response list.
+    Handles title fallback, employee matching, and deduplication.
+    """
+    created_tasks = []
+    seen_descriptions = set()
+
+    for t in ai_tasks:
+        desc = t.get('description', '')
+        if isinstance(desc, list):
+            desc = '\n'.join(f'- {item}' for item in desc)
+
+        # Deduplicate: skip if very similar description already created
+        desc_lower = desc.lower().strip()[:80]
+        if desc_lower in seen_descriptions:
+            continue
+        seen_descriptions.add(desc_lower)
+
+        # Title: use AI title or generate from description
+        title = t.get('title', '').strip()
+        if not title or title.lower() == 'untitled task' or title.lower() == 'untitled':
+            title = _generate_title_from_description(desc)
+        title = title[:500]
+
+        # Employee matching
+        assignee_name = t.get('assignee')
+        employee = _match_employee(assignee_name) if assignee_name else None
+
+        # Priority
+        priority = t.get('priority', 'medium')
+        if priority not in dict(Task.PRIORITY_CHOICES):
+            priority = 'medium'
+
+        new_task = Task.objects.create(
+            title=title,
+            description=desc,
+            assigned_to=employee,
+            meeting=meeting,
+            status='pending',
+            priority=priority,
+            source='ai',
+            created_at=meeting_date,
+        )
+        created_tasks.append(new_task)
+
+    return created_tasks
+
+
 def _notify_task_assignees(tasks):
     """Send a single consolidated email per employee with all their tasks grouped.
     Called automatically after task generation.
@@ -84,9 +171,19 @@ class MeetingViewSet(viewsets.ModelViewSet):
                 text = entry.get('text', '')
                 transcript_text += f"{speaker}: {text}\n"
 
+        # Include Fathom's own action items as a reference for the AI
+        action_items_hint = ''
+        if meeting.raw_action_items:
+            action_items_hint = '\nFathom already detected these action items (use as reference):\n'
+            for ai in meeting.raw_action_items:
+                assignee = ai.get('assignee', {}).get('name', 'Unknown') if ai.get('assignee') else 'Unknown'
+                desc = ai.get('description', '')
+                action_items_hint += f'- {assignee}: {desc}\n'
+
         input_text = f"Meeting Title: {meeting.title}\n\n"
         if transcript_text:
             input_text += f"Transcript:\n{transcript_text}\n"
+        input_text += action_items_hint
 
         if not settings.OPENROUTER_API_KEY:
             return Response({'error': 'OpenRouter API key not configured. Set OPENROUTER_API_KEY in backend settings.'}, status=400)
@@ -98,34 +195,9 @@ class MeetingViewSet(viewsets.ModelViewSet):
             return Response({'status': 'failed', 'error': f'AI returned no valid tasks. Model={settings.OPENROUTER_MODEL}, API key set={"yes" if settings.OPENROUTER_API_KEY else "no"}, input_len={len(input_text)}'}, status=500)
 
         meeting_date = meeting.recorded_at or meeting.created_at
-        for t in ai_tasks:
-            title = (t.get('title') or 'Untitled Task')[:500]
-            desc = t.get('description', '')
-            if isinstance(desc, list):
-                desc = '\n'.join(f'- {item}' for item in desc)
-            assignee_name = t.get('assignee')
-            employee = None
-            if assignee_name:
-                name = assignee_name.strip()
-                employee = Employee.objects.filter(name__iexact=name).first()
-                if not employee:
-                    employee = Employee.objects.filter(name__icontains=name).first()
-            priority = t.get('priority', 'medium')
-            if priority not in dict(Task.PRIORITY_CHOICES):
-                priority = 'medium'
-            Task.objects.create(
-                title=title,
-                description=desc,
-                assigned_to=employee,
-                meeting=meeting,
-                status='pending',
-                priority=priority,
-                source='ai',
-                created_at=meeting_date,
-            )
+        created_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date)
 
         # Auto-send assignment emails to assignees
-        created_tasks = Task.objects.filter(meeting=meeting, source='ai')
         emailed = _notify_task_assignees(created_tasks)
 
         from .serializers import TaskSerializer
@@ -257,11 +329,21 @@ def _auto_generate_tasks_for_meeting(meeting):
     if not transcript_text and not meeting.summary:
         return 0
 
+    # Include Fathom's own action items as a reference for the AI
+    action_items_hint = ''
+    if meeting.raw_action_items:
+        action_items_hint = '\nFathom already detected these action items (use as reference):\n'
+        for ai in meeting.raw_action_items:
+            assignee = ai.get('assignee', {}).get('name', 'Unknown') if ai.get('assignee') else 'Unknown'
+            desc = ai.get('description', '')
+            action_items_hint += f'- {assignee}: {desc}\n'
+
     input_text = f"Meeting Title: {meeting.title}\n\n"
     if transcript_text:
         input_text += f"Transcript:\n{transcript_text}\n"
     elif meeting.summary:
         input_text += f"Summary:\n{meeting.summary}\n"
+    input_text += action_items_hint
 
     if not settings.OPENROUTER_API_KEY:
         return 0
@@ -272,33 +354,7 @@ def _auto_generate_tasks_for_meeting(meeting):
         return 0
 
     meeting_date = meeting.recorded_at or meeting.created_at
-    created_tasks = []
-    for t in ai_tasks:
-        title = (t.get('title') or 'Untitled Task')[:500]
-        desc = t.get('description', '')
-        if isinstance(desc, list):
-            desc = '\n'.join(f'- {item}' for item in desc)
-        assignee_name = t.get('assignee')
-        employee = None
-        if assignee_name:
-            name = assignee_name.strip()
-            employee = Employee.objects.filter(name__iexact=name).first()
-            if not employee:
-                employee = Employee.objects.filter(name__icontains=name).first()
-        priority = t.get('priority', 'medium')
-        if priority not in dict(Task.PRIORITY_CHOICES):
-            priority = 'medium'
-        new_task = Task.objects.create(
-            title=title,
-            description=desc,
-            assigned_to=employee,
-            meeting=meeting,
-            status='pending',
-            priority=priority,
-            source='ai',
-            created_at=meeting_date,
-        )
-        created_tasks.append(new_task)
+    created_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date)
 
     # Send one consolidated email per employee
     send_batch_tasks_email(created_tasks)
@@ -694,40 +750,24 @@ def generate_ai_tasks(request):
                 speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
                 text = entry.get('text', '')
                 transcript_text += f"{speaker}: {text}\n"
+        action_items_hint = ''
+        if meeting.raw_action_items:
+            action_items_hint = '\nFathom already detected these action items (use as reference):\n'
+            for ai in meeting.raw_action_items:
+                assignee = ai.get('assignee', {}).get('name', 'Unknown') if ai.get('assignee') else 'Unknown'
+                desc = ai.get('description', '')
+                action_items_hint += f'- {assignee}: {desc}\n'
         input_text = f"Meeting Title: {meeting.title}\n\n"
         if transcript_text:
             input_text += f"Transcript:\n{transcript_text}\n"
+        input_text += action_items_hint
         ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
         if not ai_tasks or not isinstance(ai_tasks, list):
             continue
         meeting_date = meeting.recorded_at or meeting.created_at
-        for t in ai_tasks:
-            title = (t.get('title') or 'Untitled Task')[:500]
-            desc = t.get('description', '')
-            if isinstance(desc, list):
-                desc = '\n'.join(f'- {item}' for item in desc)
-            assignee_name = t.get('assignee')
-            employee = None
-            if assignee_name:
-                name = assignee_name.strip()
-                employee = Employee.objects.filter(name__iexact=name).first()
-                if not employee:
-                    employee = Employee.objects.filter(name__icontains=name).first()
-            priority = t.get('priority', 'medium')
-            if priority not in dict(Task.PRIORITY_CHOICES):
-                priority = 'medium'
-            new_task = Task.objects.create(
-                title=title,
-                description=desc,
-                assigned_to=employee,
-                meeting=meeting,
-                status='pending',
-                priority=priority,
-                source='ai',
-                created_at=meeting_date,
-            )
-            all_new_tasks.append(new_task)
-            total += 1
+        new_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date)
+        all_new_tasks.extend(new_tasks)
+        total += len(new_tasks)
 
     # Send one consolidated email per employee
     if all_new_tasks:

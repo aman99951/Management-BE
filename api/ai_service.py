@@ -20,24 +20,23 @@ def generate_tasks_from_summary(transcript_text, meeting_title):
     if len(transcript_text) > MAX_INPUT_CHARS:
         transcript_text = transcript_text[:MAX_INPUT_CHARS] + "\n\n[Note: transcript truncated due to length]"
 
-    prompt = f"""You are a meticulous task extraction assistant. Extract EVERY single action item and task for EVERY person in this transcript. Leave NOTHING out.
+    prompt = f"""You are a precise task extraction assistant. Your job is to extract ONLY explicit action items where someone is clearly assigned to do something in the future.
 
 For each task provide:
-- title: concise title (max 100 chars)
-- description: full task details with context
-- assignee: the person responsible — use their name EXACTLY as spoken in the transcript
+- title: concise title (max 100 chars) — GENERATE THIS FROM the description, DO NOT leave it blank or "Untitled"
+- description: specific task details quoting what was actually said
+- assignee: the person responsible — use their FULL name EXACTLY as it appears in the transcript speaker labels (e.g., "Sekar D", "karan kumar", "Avinesh Duraimanickam", "Praveen G")
 - priority: "low", "medium", "high", or "critical"
 
-ABSOLUTE RULES — FOLLOW THESE WITHOUT EXCEPTION:
-1. Scan the ENTIRE transcript line by line. Every time someone is told to do something, that is a task.
-2. Capture tasks EVEN if they seem small, obvious, or were already implied.
-3. Pay close attention when the boss or manager assigns work — that person is the assignee.
-4. If the same person has multiple tasks, create a SEPARATE task for EACH one.
-5. Only merge two tasks if they are WORD-FOR-WORD identical in meaning.
-6. Do NOT skip anyone. If their name appears with a responsibility, include them.
-7. When unsure about assignee, use null rather than omit the task.
-8. Include tasks from quick asides, follow-ups, and assumed handoffs.
-9. Return ONLY a valid JSON array of task objects — no commentary.
+CRITICAL RULES — FOLLOW THESE WITHOUT EXCEPTION:
+1. ONLY create a task when someone is EXPLICITLY told or agrees to do something in the FUTURE. IGNORE past-tense progress updates (e.g., "yesterday I worked on X" is NOT a task).
+2. The assignee MUST be the person who WILL DO the work, not the person who assigned it.
+3. If someone says "I'll do X" or "I will X", that is a task for that person.
+4. If a manager tells someone "please do X", the assignee is the person told to do it.
+5. Do NOT create tasks from general discussion, brainstorming, or problem descriptions without a clear "who will do what".
+6. Use the speaker name EXACTLY as shown in the transcript (e.g., "Sekar D", "karan kumar", "Avinesh Duraimanickam").
+7. NEVER use null for assignee — if no one is clearly assigned, omit that item entirely.
+8. Return ONLY a valid JSON array of task objects — no commentary, no markdown.
 
 Meeting: {meeting_title}
 
