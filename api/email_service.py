@@ -6,7 +6,7 @@ In development (default) it prints to the console via console.EmailBackend.
 Configure SMTP in .env for real deliveries.
 """
 import logging
-from django.core.mail import send_mail as django_send_mail
+from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.conf import settings
 from django.utils import timezone
@@ -22,23 +22,29 @@ def _get_frontend_url():
     return os.getenv('FRONTEND_URL', '#')
 
 
+# ── CC recipients for task assignment emails ──
+TASK_CC_LIST = ['gajendran@mgtechnosolutions.com', 'sekar@mgtechnosolutions.com']
+
+
 # ── Core send function ──
 
-def send_email(to_email, subject, html_body, text_body=None):
+def send_email(to_email, subject, html_body, text_body=None, cc_list=None):
     """Send a single email. Returns True on success."""
     if not to_email:
         logger.warning(f"send_email skipped: no recipient email (subject={subject[:50]})")
         return False
     try:
-        django_send_mail(
+        msg = EmailMultiAlternatives(
             subject=subject,
-            message=text_body or html_body,
-            html_message=html_body,
+            body=text_body or html_body,
             from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[to_email],
-            fail_silently=False,
+            to=[to_email],
+            cc=cc_list or [],
         )
-        logger.info(f"Email sent to {to_email}: {subject[:60]}")
+        msg.attach_alternative(html_body, "text/html")
+        msg.send(fail_silently=False)
+        cc_str = f" (CC: {', '.join(cc_list)})" if cc_list else ''
+        logger.info(f"Email sent to {to_email}{cc_str}: {subject[:60]}")
         return True
     except Exception as e:
         logger.error(f"Failed to send email to {to_email}: {e}")
@@ -130,6 +136,7 @@ def send_action_items_to_assignees(priority_filter=None, status_filter='pending'
             subject=f"📋 Your Action Items — {len(tasks)} task{'s' if len(tasks) != 1 else ''}",
             html_body=html_body,
             text_body=text_body,
+            cc_list=TASK_CC_LIST,
         )
         results.append({
             'employee_name': emp.name,
@@ -178,6 +185,7 @@ def send_task_assignment_email(task):
         subject=f"📌 New Task: {task.title[:60]}",
         html_body=html_body,
         text_body=text_body,
+        cc_list=TASK_CC_LIST,
     )
 
 
@@ -239,6 +247,7 @@ def send_batch_tasks_email(tasks):
             subject=f"📋 {len(emp_tasks)} New Task{'s' if len(emp_tasks) != 1 else ''} for You",
             html_body=html_body,
             text_body=text_body,
+            cc_list=TASK_CC_LIST,
         )
         if result:
             sent_count += 1
