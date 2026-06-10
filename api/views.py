@@ -349,18 +349,41 @@ def _verify_backlog_candidates(candidates):
         return []
     from .ai_service import classify_backlog_item
     verified = []
+
+    # Pre-load all task titles for fast matching
+    all_tasks = list(Task.objects.values('id', 'title', 'description'))
+
+    def find_matching_task(text, task_title_hint=None):
+        """Find an existing task that matches the given text or hint."""
+        # First try the AI's hint
+        if task_title_hint:
+            for t in all_tasks:
+                if task_title_hint.lower() in t['title'].lower():
+                    return t
+        # Then try matching words from text against task titles
+        words = set(w.lower() for w in text.split() if len(w) > 3)
+        best_match = None
+        best_score = 0
+        for t in all_tasks:
+            title_words = set(w.lower() for w in t['title'].split())
+            score = len(words & title_words)
+            if score > best_score:
+                best_score = score
+                best_match = t
+        if best_score >= 2:
+            return best_match
+        return None
+
     for c in candidates:
         label = f"{c['source']} | {c.get('context', '')}"
         result = classify_backlog_item(c['text'], label)
         if result and result.get('is_backlog_item'):
             desc = result['description']
-            # If AI detected a reference to an existing task, look it up
-            task_title = result.get('task_title')
-            if task_title:
-                match = Task.objects.filter(title__icontains=task_title).first()
-                if match:
-                    desc = f"[From task: {match.title}] {match.description or ''}\n\n{desc}"
-                    c['source_ref'] = f'Task: {match.title}'
+            task_title_hint = result.get('task_title')
+            match = find_matching_task(c['text'], task_title_hint)
+            if match:
+                desc = f"[From task: {match['title']}] {match['description'] or match['title']}"
+                c['source_ref'] = f'Task: {match["title"]}'
             c['text'] = desc
             verified.append(c)
     return verified

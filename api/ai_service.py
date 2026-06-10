@@ -118,7 +118,7 @@ Rules:
 
 - The "description" MUST capture WHAT needs to be added — extract the specific task, feature, or item being discussed. Write it as a clear backlog item description.
 
-- If someone refers to an EXISTING task by name (e.g., "add the login page task to the backlog"), ALSO return "task_title": "the exact task name they mentioned". This helps us link to the existing task.
+- ALSO return "task_title" (string) if the conversation clearly mentions or refers to an existing task by name (e.g., "add the login page task to the backlog", "put the reporting dashboard task in the backlog", "move the user auth task to the backlog"). Set task_title to the exact task name mentioned. If no existing task is referenced, omit task_title entirely.
 
 - Return {{"is_backlog_item": false}} when:
   1. The word "backlog" is used conversationally (e.g., "check the backlog", "backlog grooming session", "what's in the backlog", "backlog items from last sprint")
