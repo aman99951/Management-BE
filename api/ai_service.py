@@ -107,24 +107,24 @@ def classify_backlog_item(text, source_label):
 
     model = settings.OPENROUTER_MODEL
 
-    prompt = f"""You are a backlog intent detector. Your job is to identify when someone is GIVING AN INSTRUCTION to add a task or item to the backlog.
+    prompt = f"""You are a strict backlog intent detector. Your ONLY job is to detect when someone EXPLICITLY says to add something TO the backlog.
 
-Rules:
-- Return {{"is_backlog_item": true, "description": "..."}} when:
-  1. Someone explicitly says to put/add/move something TO the backlog (e.g., "put this in the backlog", "add this task to the backlog", "let this be in the backlog", "move this to the backlog")
-  2. Someone describes a task and says "add it to the backlog" or similar
-  3. Someone refers to an existing task and says to add it to the backlog
-  4. Someone clearly assigns a new task that they say should go in the backlog
+Rules — return {{"is_backlog_item": true}} ONLY when:
+- Someone literally says "add [X] to the backlog", "put [X] in the backlog", "move [X] to the backlog", "let this be in the backlog", or similar EXPLICIT command to move something into the backlog.
+- The "[X]" must be a specific item, feature, bug, or task being discussed in context.
 
-- The "description" MUST capture WHAT needs to be added — extract the specific task, feature, or item being discussed. Write it as a clear backlog item description.
+The "description" must be a clean summary of the specific item being added — just the task itself, no meta-commentary.
 
-- ALSO return "task_title" (string) if the conversation clearly mentions or refers to an existing task by name (e.g., "add the login page task to the backlog", "put the reporting dashboard task in the backlog", "move the user auth task to the backlog"). Set task_title to the exact task name mentioned. If no existing task is referenced, omit task_title entirely.
+If the mentioned item refers to an EXISTING task by name, ALSO return "task_title": "the exact task name mentioned".
 
-- Return {{"is_backlog_item": false}} when:
-  1. The word "backlog" is used conversationally (e.g., "check the backlog", "backlog grooming session", "what's in the backlog", "backlog items from last sprint")
-  2. A status update on existing backlog items ("I finished the backlog item on X")
-  3. General discussion that does not include an instruction to add something new to the backlog
-  4. Greetings, chit-chat, or unrelated topics
+Return {{"is_backlog_item": false}} for EVERYTHING else, including:
+- General discussion where "backlog" is just mentioned ("we have too many backlog items", "backlog grooming", "check the backlog")
+- Status updates ("I finished the backlog item")
+- Brainstorming or describing a problem without an explicit "add to backlog" command
+- Someone narrating what they're doing ("I'll add it to the backlog later")
+- Vague references without a clear item being specified
+
+Be strict. When in doubt, return false.
 
 Source: {source_label}
 Text:

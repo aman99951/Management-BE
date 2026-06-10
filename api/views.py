@@ -288,16 +288,29 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
 
 @api_view(['POST'])
 def backlog_scan(request):
-    """AI-powered scan: detect when someone says to add items to the backlog."""
+    """AI-powered scan: detect when someone says to add items to the backlog.
+    Accepts optional POST body: {"days_back": N} — only scans meetings from last N days (default: 1)."""
+    days_back = 1
+    try:
+        body = json.loads(request.body) if request.body else {}
+        days_back = int(body.get('days_back', 1))
+    except (json.JSONDecodeError, ValueError, TypeError):
+        days_back = 1
+    days_back = max(days_back, 0)
+
     candidates = []
 
     # Load existing backlog source_refs to avoid duplicates
     existing_refs = set(BacklogItem.objects.filter(source='auto-capture').values_list('source_ref', flat=True))
 
+    since_date = timezone.now() - timedelta(days=days_back) if days_back > 0 else None
+
     # Scan meeting transcriptions and summaries
     meetings = Meeting.objects.exclude(
         Q(transcript__isnull=True) & Q(summary__exact='')
     )
+    if since_date:
+        meetings = meetings.filter(created_at__gte=since_date)
     for meeting in meetings:
         texts = []
         if meeting.summary:
