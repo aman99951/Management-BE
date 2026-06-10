@@ -10,6 +10,7 @@ router.register(r'schedule', ScheduledMeetingViewSet, basename='schedule')
 router.register(r'backlog', BacklogItemViewSet)
 
 urlpatterns = [
+    path('backlog/scan/', backlog_scan),
     path('tasks/generate-ai/', generate_ai_tasks),
     path('', include(router.urls)),
     path('fathom/config/', fathom_config_view),
@@ -34,5 +35,4 @@ urlpatterns = [
     path('google-calendar/disconnect/', google_calendar_disconnect),
     path('notifications/', notifications_list),
     path('notifications/mark-read/', notifications_mark_read),
-    path('backlog/scan/', backlog_scan),
 ]

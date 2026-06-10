@@ -288,8 +288,8 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
 
 @api_view(['POST'])
 def backlog_scan(request):
-    """Scan meetings and comments for 'backlog' keyword and return matches."""
-    found = []
+    """AI-powered scan: detect when someone says to add items to the backlog."""
+    candidates = []
 
     # Load existing backlog source_refs to avoid duplicates
     existing_refs = set(BacklogItem.objects.filter(source='auto-capture').values_list('source_ref', flat=True))
@@ -312,31 +312,58 @@ def backlog_scan(request):
                         texts.append(('transcript', txt))
         for source_type, text in texts:
             if 'backlog' in text.lower():
-                excerpt = text[:200] + '...' if len(text) > 200 else text
                 source = f'Meeting "{meeting.title}" — {"AI Summary" if source_type == "summary" else "Transcription"}'
                 if source in existing_refs:
                     continue
-                found.append({
-                    'text': excerpt,
+                # Send full text for AI to understand context
+                candidates.append({
+                    'text': text,
                     'source': source,
                     'source_id': meeting.id,
+                    'context': f'Meeting title: {meeting.title}, type: {source_type}',
                 })
 
     # Scan task comments
     for task in Task.objects.all():
         for comment in task.comments.all():
             if 'backlog' in (comment.text or '').lower():
-                excerpt = comment.text[:200] + '...' if len(comment.text) > 200 else comment.text
                 source = f'Comment on: {task.title}'
                 if source in existing_refs:
                     continue
-                found.append({
-                    'text': excerpt,
+                candidates.append({
+                    'text': comment.text,
                     'source': source,
                     'source_id': task.id,
+                    'context': f'Comment on task: {task.title}',
                 })
 
-    return Response({'items': found})
+    # AI verification
+    verified = _verify_backlog_candidates(candidates)
+
+    return Response({'items': verified})
+
+
+def _verify_backlog_candidates(candidates):
+    """Send each candidate to AI and return only verified backlog items."""
+    if not candidates:
+        return []
+    from .ai_service import classify_backlog_item
+    verified = []
+    for c in candidates:
+        label = f"{c['source']} | {c.get('context', '')}"
+        result = classify_backlog_item(c['text'], label)
+        if result and result.get('is_backlog_item'):
+            desc = result['description']
+            # If AI detected a reference to an existing task, look it up
+            task_title = result.get('task_title')
+            if task_title:
+                match = Task.objects.filter(title__icontains=task_title).first()
+                if match:
+                    desc = f"[From task: {match.title}] {match.description or ''}\n\n{desc}"
+                    c['source_ref'] = f'Task: {match.title}'
+            c['text'] = desc
+            verified.append(c)
+    return verified
 
 
 @api_view(['GET', 'POST'])
