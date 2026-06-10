@@ -168,9 +168,11 @@ Text:
 
 
 def _parse_json_response(content):
+    if not content:
+        return None
     try:
         return json.loads(content)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         pass
     match = re.search(r'```(?:json)?\s*([\s\S]*?)```', content)
     if match:
