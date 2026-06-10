@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Employee, Meeting, Task, Comment, FathomConfig, GoogleCalendarToken, ScheduledMeeting, Notification
+from .models import Employee, Meeting, Task, Comment, FathomConfig, GoogleCalendarToken, ScheduledMeeting, Notification, BacklogItem
 
 class EmployeeSerializer(serializers.ModelSerializer):
     class Meta:
@@ -90,6 +90,13 @@ class NotificationSerializer(serializers.ModelSerializer):
             'is_read': {'required': False},
         }
 
+
+class BacklogItemSerializer(serializers.ModelSerializer):
+    owner_name = serializers.CharField(source='owner.name', read_only=True, default=None)
+
+    class Meta:
+        model = BacklogItem
+        fields = '__all__'
 
 class FathomWebhookSerializer(serializers.Serializer):
     recording_id = serializers.IntegerField()

@@ -133,6 +133,35 @@ class ScheduledMeeting(models.Model):
         return self.title
 
 
+class BacklogItem(models.Model):
+    PRIORITY_CHOICES = [
+        ('Low', 'Low'),
+        ('Medium', 'Medium'),
+        ('High', 'High'),
+        ('Critical', 'Critical'),
+    ]
+    STATUS_CHOICES = [
+        ('New', 'New'),
+        ('Reviewed', 'Reviewed'),
+        ('In Progress', 'In Progress'),
+        ('Done', 'Done'),
+    ]
+    description = models.TextField()
+    image = models.TextField(blank=True, null=True, help_text='Base64 encoded image data')
+    priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default='Medium')
+    owner = models.ForeignKey(Employee, on_delete=models.SET_NULL, null=True, blank=True, related_name='backlog_items')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='New')
+    source = models.CharField(max_length=20, default='manual', choices=[('manual', 'Manual'), ('auto-capture', 'Auto-captured')])
+    source_ref = models.CharField(max_length=500, blank=True, help_text='Reference to the source meeting/comment')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.description[:80]
+
 class Notification(models.Model):
     recipient = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='notifications')
     meeting = models.ForeignKey(ScheduledMeeting, on_delete=models.CASCADE, related_name='notifications', null=True, blank=True)

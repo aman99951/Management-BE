@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Employee, Meeting, Task, FathomConfig, GoogleCalendarToken, ScheduledMeeting, Notification
+from .models import Employee, Meeting, Task, FathomConfig, GoogleCalendarToken, ScheduledMeeting, Notification, BacklogItem
 
 admin.site.register(Employee)
 admin.site.register(Meeting)
@@ -8,3 +8,4 @@ admin.site.register(FathomConfig)
 admin.site.register(GoogleCalendarToken)
 admin.site.register(ScheduledMeeting)
 admin.site.register(Notification)
+admin.site.register(BacklogItem)

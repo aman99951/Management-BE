@@ -19,8 +19,8 @@ from django.db.models import Count, Q
 from django.db.models.functions import TruncDay
 from django.utils import timezone
 import requests as http_requests
-from .models import Employee, Meeting, Task, FathomConfig, Comment, GoogleCalendarToken, ScheduledMeeting, Notification
-from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, FathomWebhookSerializer, CommentSerializer, GoogleCalendarTokenSerializer, ScheduledMeetingSerializer, NotificationSerializer
+from .models import Employee, Meeting, Task, FathomConfig, Comment, GoogleCalendarToken, ScheduledMeeting, Notification, BacklogItem
+from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, FathomWebhookSerializer, CommentSerializer, GoogleCalendarTokenSerializer, ScheduledMeetingSerializer, NotificationSerializer, BacklogItemSerializer
 from .email_service import send_action_items_to_assignees, send_meeting_invitation, send_meeting_created_notification, send_task_assignment_email, send_batch_tasks_email
 
 
@@ -280,6 +280,64 @@ class TaskViewSet(viewsets.ModelViewSet):
             serializer.save(task=task, author=author)
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
+
+class BacklogItemViewSet(viewsets.ModelViewSet):
+    queryset = BacklogItem.objects.all()
+    serializer_class = BacklogItemSerializer
+
+
+@api_view(['POST'])
+def backlog_scan(request):
+    """Scan meetings and comments for 'backlog' keyword and return matches."""
+    found = []
+
+    # Load existing backlog source_refs to avoid duplicates
+    existing_refs = set(BacklogItem.objects.filter(source='auto-capture').values_list('source_ref', flat=True))
+
+    # Scan meeting transcriptions and summaries
+    meetings = Meeting.objects.exclude(
+        Q(transcript__isnull=True) & Q(summary__exact='')
+    )
+    for meeting in meetings:
+        texts = []
+        if meeting.summary:
+            texts.append(('summary', meeting.summary))
+        if meeting.transcript:
+            if isinstance(meeting.transcript, str):
+                texts.append(('transcript', meeting.transcript))
+            elif isinstance(meeting.transcript, list):
+                for chunk in meeting.transcript:
+                    txt = chunk if isinstance(chunk, str) else chunk.get('text', '') or chunk.get('content', '')
+                    if txt:
+                        texts.append(('transcript', txt))
+        for source_type, text in texts:
+            if 'backlog' in text.lower():
+                excerpt = text[:200] + '...' if len(text) > 200 else text
+                source = f'Meeting "{meeting.title}" — {"AI Summary" if source_type == "summary" else "Transcription"}'
+                if source in existing_refs:
+                    continue
+                found.append({
+                    'text': excerpt,
+                    'source': source,
+                    'source_id': meeting.id,
+                })
+
+    # Scan task comments
+    for task in Task.objects.all():
+        for comment in task.comments.all():
+            if 'backlog' in (comment.text or '').lower():
+                excerpt = comment.text[:200] + '...' if len(comment.text) > 200 else comment.text
+                source = f'Comment on: {task.title}'
+                if source in existing_refs:
+                    continue
+                found.append({
+                    'text': excerpt,
+                    'source': source,
+                    'source_id': task.id,
+                })
+
+    return Response({'items': found})
+
 
 @api_view(['GET', 'POST'])
 @csrf_exempt

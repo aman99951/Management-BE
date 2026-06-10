@@ -45,7 +45,8 @@ Transcript:
 {transcript_text}"""
 
     import time
-    for attempt in range(2):
+    MAX_ATTEMPTS = 5
+    for attempt in range(MAX_ATTEMPTS):
         try:
             resp = requests.post(
                 OPENROUTER_URL,
@@ -63,32 +64,32 @@ Transcript:
                 timeout=30,
             )
             if resp.status_code != 200:
-                print(f"OpenRouter attempt {attempt+1} failed: {resp.status_code} {resp.text[:500]}", file=sys.stderr)
-                if attempt < 1:
-                    time.sleep(2)
+                print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS} failed: {resp.status_code} {resp.text[:500]}", file=sys.stderr)
+                if attempt < MAX_ATTEMPTS - 1:
+                    time.sleep(2 ** attempt)
                 continue
             try:
                 content = resp.json()["choices"][0]["message"]["content"]
             except (KeyError, IndexError, json.JSONDecodeError) as e:
-                print(f"OpenRouter attempt {attempt+1} parse error: {e} body={resp.text[:500]}", file=sys.stderr)
-                if attempt < 1:
-                    time.sleep(2)
+                print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS} parse error: {e} body={resp.text[:500]}", file=sys.stderr)
+                if attempt < MAX_ATTEMPTS - 1:
+                    time.sleep(2 ** attempt)
                 continue
             if not content:
-                print(f"OpenRouter attempt {attempt+1} returned empty content", file=sys.stderr)
-                if attempt < 1:
-                    time.sleep(2)
+                print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS} returned empty content", file=sys.stderr)
+                if attempt < MAX_ATTEMPTS - 1:
+                    time.sleep(2 ** attempt)
                 continue
             result = _parse_json_response(content)
             if result:
                 return result
-            print(f"OpenRouter attempt {attempt+1}: could not parse JSON from content: {content[:500]}", file=sys.stderr)
-            if attempt < 1:
-                time.sleep(2)
+            print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS}: could not parse JSON from content: {content[:500]}", file=sys.stderr)
+            if attempt < MAX_ATTEMPTS - 1:
+                time.sleep(2 ** attempt)
         except requests.RequestException as e:
-            print(f"OpenRouter attempt {attempt+1} request exception: {e}", file=sys.stderr)
-            if attempt < 1:
-                time.sleep(2)
+            print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS} request exception: {e}", file=sys.stderr)
+            if attempt < MAX_ATTEMPTS - 1:
+                time.sleep(2 ** attempt)
 
     return None
 
