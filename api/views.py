@@ -366,7 +366,7 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
 
 @api_view(['POST'])
 def backlog_scan(request):
-    """AI-powered scan: detect when someone says to add items to the backlog.
+    """AI-powered scan: analyze full meeting conversations to extract structured product enhancement ideas.
     Accepts optional POST body: {"days_back": N} — only scans meetings from last N days (default: 1)."""
     days_back = 1
     try:
@@ -376,94 +376,114 @@ def backlog_scan(request):
         days_back = 1
     days_back = max(days_back, 0)
 
-    candidates = []
-
-    # Load existing backlog source_refs to avoid duplicates
-    existing_refs = set(BacklogItem.objects.filter(source='auto-capture').values_list('source_ref', flat=True))
+    from .ai_service import analyze_meeting_for_enhancements
 
     since_date = timezone.now() - timedelta(days=days_back) if days_back > 0 else None
 
-    # Scan meeting transcriptions and summaries
+    # Collect meetings with transcripts or summaries
     meetings = Meeting.objects.exclude(
         Q(transcript__isnull=True) & Q(summary__exact='')
     )
     if since_date:
         meetings = meetings.filter(created_at__gte=since_date)
+
+    # Load existing source_refs to avoid duplicate creation
+    existing_sources = set(BacklogItem.objects.filter(source='auto-capture').values_list('source_ref', flat=True))
+
+    all_enhancements = []
+    processed_meetings = 0
+
     for meeting in meetings:
-        texts = []
+        meeting_ref = f'Meeting: {meeting.title} (ID: {meeting.id})'
+        if meeting_ref in existing_sources:
+            continue
+
+        # Build full meeting content
+        meeting_text_parts = []
         if meeting.summary:
-            texts.append(('summary', meeting.summary))
+            meeting_text_parts.append(f"--- AI Summary ---\n{meeting.summary}")
         if meeting.transcript:
             if isinstance(meeting.transcript, str):
-                texts.append(('transcript', meeting.transcript))
+                meeting_text_parts.append(f"--- Transcript ---\n{meeting.transcript}")
             elif isinstance(meeting.transcript, list):
+                transcript_lines = []
                 for chunk in meeting.transcript:
-                    txt = chunk if isinstance(chunk, str) else chunk.get('text', '') or chunk.get('content', '')
-                    if txt:
-                        texts.append(('transcript', txt))
-        for source_type, text in texts:
-            if 'backlog' in text.lower():
-                source = f'Meeting "{meeting.title}" — {"AI Summary" if source_type == "summary" else "Transcription"}'
-                if source in existing_refs:
-                    continue
-                # Send full text for AI to understand context
-                candidates.append({
-                    'text': text,
-                    'source': source,
-                    'source_id': meeting.id,
-                    'context': f'Meeting title: {meeting.title}, type: {source_type}',
-                })
+                    speaker = chunk.get('speaker', {})
+                    speaker_name = speaker.get('display_name', 'Unknown') if isinstance(speaker, dict) else 'Unknown'
+                    text = chunk.get('text', '') or chunk.get('content', '')
+                    if text:
+                        transcript_lines.append(f"{speaker_name}: {text}")
+                if transcript_lines:
+                    meeting_text_parts.append(f"--- Transcript ---\n" + '\n'.join(transcript_lines))
 
-    # AI verification
-    verified = _verify_backlog_candidates(candidates)
+        meeting_text = '\n\n'.join(meeting_text_parts)
+        if not meeting_text:
+            continue
 
-    return Response({'items': verified})
+        # Send to AI for comprehensive analysis
+        enhancements = analyze_meeting_for_enhancements(meeting_text, meeting.title)
+        processed_meetings += 1
 
+        for item in enhancements:
+            item['meeting_id'] = meeting.id
+            item['meeting_title'] = meeting.title
+            item['source_ref'] = meeting_ref
+            all_enhancements.append(item)
 
-def _verify_backlog_candidates(candidates):
-    """Send each candidate to AI and return only verified backlog items."""
-    if not candidates:
-        return []
-    from .ai_service import classify_backlog_item
-    verified = []
+    # Create BacklogItems for each enhancement
+    created_count = 0
+    created_items = []
+    for item in all_enhancements:
+        # Build a comprehensive description from the structured fields
+        description_parts = []
+        if item.get('background'):
+            description_parts.append(f"Background / Problem Statement:\n{item['background']}")
+        if item.get('proposed_enhancement'):
+            description_parts.append(f"Proposed Enhancement:\n{item['proposed_enhancement']}")
+        if item.get('expected_benefits'):
+            description_parts.append(f"Expected Benefits / Business Impact:\n{item['expected_benefits']}")
+        if item.get('stakeholders'):
+            description_parts.append(f"Stakeholders Affected: {item['stakeholders']}")
+        if item.get('source_of_idea'):
+            description_parts.append(f"Source of Idea: {item['source_of_idea']}")
 
-    # Pre-load all task titles for fast matching
-    all_tasks = list(Task.objects.values('id', 'title', 'description'))
+        description = '\n\n---\n\n'.join(description_parts)
 
-    def find_matching_task(text, task_title_hint=None):
-        """Find an existing task that matches the given text or hint."""
-        # First try the AI's hint
-        if task_title_hint:
-            for t in all_tasks:
-                if task_title_hint.lower() in t['title'].lower():
-                    return t
-        # Then try matching words from text against task titles
-        words = set(w.lower() for w in text.split() if len(w) > 3)
-        best_match = None
-        best_score = 0
-        for t in all_tasks:
-            title_words = set(w.lower() for w in t['title'].split())
-            score = len(words & title_words)
-            if score > best_score:
-                best_score = score
-                best_match = t
-        if best_score >= 2:
-            return best_match
-        return None
+        # Map priority
+        priority = item.get('priority', 'Medium')
+        if priority not in dict(BacklogItem.PRIORITY_CHOICES):
+            priority = 'Medium'
 
-    for c in candidates:
-        label = f"{c['source']} | {c.get('context', '')}"
-        result = classify_backlog_item(c['text'], label)
-        if result and result.get('is_backlog_item'):
-            desc = result['description']
-            task_title_hint = result.get('task_title')
-            match = find_matching_task(c['text'], task_title_hint)
-            if match:
-                desc = f"[From task: {match['title']}] {match['description'] or match['title']}"
-                c['source_ref'] = f'Task: {match["title"]}'
-            c['text'] = desc
-            verified.append(c)
-    return verified
+        backlog_item = BacklogItem.objects.create(
+            description=description,
+            priority=priority,
+            status='Future Consideration',
+            source='auto-capture',
+            source_ref=item.get('source_ref', ''),
+        )
+        created_count += 1
+
+        # Return structured data to frontend
+        created_items.append({
+            'id': backlog_item.id,
+            'title': item.get('title', ''),
+            'background': item.get('background', ''),
+            'proposed_enhancement': item.get('proposed_enhancement', ''),
+            'expected_benefits': item.get('expected_benefits', ''),
+            'stakeholders': item.get('stakeholders', ''),
+            'priority': priority,
+            'source_of_idea': item.get('source_of_idea', ''),
+            'source': f'Meeting: {item.get("meeting_title", "")}',
+            'meeting_title': item.get('meeting_title', ''),
+            'created_at': backlog_item.created_at.isoformat(),
+        })
+
+    return Response({
+        'items': created_items,
+        'total_found': len(all_enhancements),
+        'processed_meetings': processed_meetings,
+        'created_count': created_count,
+    })
 
 
 @api_view(['GET', 'POST'])

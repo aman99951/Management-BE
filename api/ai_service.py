@@ -94,45 +94,59 @@ Transcript:
     return None
 
 
-def classify_backlog_item(text, source_label):
+def analyze_meeting_for_enhancements(meeting_text, meeting_title):
     """
-    Use AI to detect when someone EXPLICITLY instructs to add an item to the backlog
-    (e.g., "put this in the backlog", "add this task to the backlog"), OR when the
-    text describes a clear actionable item that should be tracked in the backlog.
-    Returns a dict with 'is_backlog_item' (bool) and 'description' (str) or None.
+    Analyze a full meeting transcript/summary to extract structured product enhancement ideas,
+    feature suggestions, process improvements, and other backlog-worthy items.
+    Returns a list of dicts with: title, background, proposed_enhancement, expected_benefits,
+    stakeholders, priority, source_of_idea, status.
     """
     api_key = settings.OPENROUTER_API_KEY
     if not api_key:
-        return None
+        print("OPENROUTER_API_KEY is not set", file=sys.stderr)
+        return []
 
     model = settings.OPENROUTER_MODEL
 
-    prompt = f"""You are a strict backlog intent detector. Your ONLY job is to detect when someone EXPLICITLY says to add something TO the backlog.
+    if len(meeting_text) > MAX_INPUT_CHARS:
+        meeting_text = meeting_text[:MAX_INPUT_CHARS] + "\n\n[Note: content truncated due to length]"
 
-Rules — return {{"is_backlog_item": true}} ONLY when:
-- Someone literally says "add [X] to the backlog", "put [X] in the backlog", "move [X] to the backlog", "let this be in the backlog", or similar EXPLICIT command to move something into the backlog.
-- The "[X]" must be a specific item, feature, bug, or task being discussed in context.
+    prompt = f"""You are a product enhancement analyst. Analyze the following meeting conversation and identify any future enhancement ideas, product improvements, workflow changes, new feature suggestions, category expansions, process optimizations, or user/provider feedback that may lead to a future implementation.
 
-The "description" must be a clean summary of the specific item being added — just the task itself, no meta-commentary.
+Create a backlog item ONLY if the discussion includes:
+• A problem, pain point, limitation, or unmet need.
+• A proposed solution, feature, or improvement.
+• Suggestions for new categories, services, workflows, integrations, or operational enhancements.
+• Customer, provider, telecaller, or admin feedback that indicates a recurring issue or opportunity.
+• Ideas that are not part of the current sprint but could be considered in future releases.
 
-If the mentioned item refers to an EXISTING task by name, ALSO return "task_title": "the exact task name mentioned".
+For each backlog item, capture:
+1. title: A concise, descriptive title (max 120 chars)
+2. background: The problem statement / context behind this idea
+3. proposed_enhancement: What the proposed solution or improvement is
+4. expected_benefits: What business impact or benefit this would bring
+5. stakeholders: Who is affected (choose from: Customer, Provider, Seller, Admin, Telecaller, Platform, or a combination like "Customer, Admin")
+6. priority: "Low", "Medium", "High", or "Critical"
+7. source_of_idea: Where this idea came from (choose from: "Meeting discussion", "Customer feedback", "Provider feedback", "Internal suggestion")
+8. status: "Future Consideration"
 
-Return {{"is_backlog_item": false}} for EVERYTHING else, including:
-- General discussion where "backlog" is just mentioned ("we have too many backlog items", "backlog grooming", "check the backlog")
-- Status updates ("I finished the backlog item")
-- Brainstorming or describing a problem without an explicit "add to backlog" command
-- Someone narrating what they're doing ("I'll add it to the backlog later")
-- Vague references without a clear item being specified
+Do NOT capture:
+• Bug fixes already assigned to the current sprint.
+• Status updates without enhancement suggestions.
+• Duplicate ideas already recorded.
+• Implementation details unless specifically discussed.
 
-Be strict. When in doubt, return false.
+Return ONLY a valid JSON array of objects with the keys listed above. If no valid backlog items are found, return an empty array [].
 
-Source: {source_label}
-Text:
-{text}
+Meeting Title: {meeting_title}
+
+Meeting Content:
+{meeting_text}
 """
 
     import time
-    for attempt in range(3):
+    MAX_ATTEMPTS = 3
+    for attempt in range(MAX_ATTEMPTS):
         try:
             resp = requests.post(
                 OPENROUTER_URL,
@@ -144,27 +158,35 @@ Text:
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                    "max_tokens": 500,
+                    "temperature": 0.3,
+                    "max_tokens": 4096,
                 },
-                timeout=15,
+                timeout=30,
             )
             if resp.status_code != 200:
-                if attempt < 2:
+                print(f"analyze_meeting_for_enhancements attempt {attempt+1} failed: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
+                if attempt < MAX_ATTEMPTS - 1:
                     time.sleep(2 ** attempt)
                 continue
             content = resp.json()["choices"][0]["message"]["content"]
             result = _parse_json_response(content)
-            if result and isinstance(result, dict):
-                if result.get("is_backlog_item") and result.get("description"):
-                    return {"is_backlog_item": True, "description": result["description"].strip()}
-                return {"is_backlog_item": False}
+            if result and isinstance(result, list):
+                # Validate each item has the required fields
+                validated = []
+                for item in result:
+                    if isinstance(item, dict) and item.get('title') and item.get('background'):
+                        validated.append(item)
+                if validated:
+                    return validated
+            print(f"analyze_meeting_for_enhancements attempt {attempt+1}: could not parse valid result from: {content[:300]}", file=sys.stderr)
+            if attempt < MAX_ATTEMPTS - 1:
+                time.sleep(2 ** attempt)
         except Exception as e:
-            print(f"classify_backlog_item attempt {attempt+1} error: {e}", file=sys.stderr)
-            if attempt < 2:
+            print(f"analyze_meeting_for_enhancements attempt {attempt+1} error: {e}", file=sys.stderr)
+            if attempt < MAX_ATTEMPTS - 1:
                 time.sleep(2 ** attempt)
 
-    return None
+    return []
 
 
 def generate_backlog_from_prompt(user_prompt):

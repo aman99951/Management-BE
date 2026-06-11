@@ -145,6 +145,7 @@ class BacklogItem(models.Model):
         ('Reviewed', 'Reviewed'),
         ('In Progress', 'In Progress'),
         ('Done', 'Done'),
+        ('Future Consideration', 'Future Consideration'),
     ]
     description = models.TextField()
     image = models.TextField(blank=True, null=True, help_text='Base64 encoded image data')
