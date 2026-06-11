@@ -167,6 +167,71 @@ Text:
     return None
 
 
+def generate_backlog_from_prompt(user_prompt):
+    """
+    Use AI to generate a well-structured backlog item from a user's free-form prompt.
+    Returns a dict with 'description', 'priority', 'status', or None.
+    """
+    api_key = settings.OPENROUTER_API_KEY
+    if not api_key:
+        print("OPENROUTER_API_KEY is not set", file=sys.stderr)
+        return None
+
+    model = settings.OPENROUTER_MODEL
+
+    prompt = f"""You are a backlog item generator. Given a user's prompt, generate a clear, structured backlog item.
+
+Rules:
+- Extract a concise but detailed description of what needs to be done.
+- Assign a priority: "Low", "Medium", "High", or "Critical".
+- Return ONLY valid JSON with keys: "description", "priority".
+- Do not include any commentary or markdown outside the JSON.
+
+User prompt:
+{user_prompt}
+"""
+
+    import time
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "http://localhost:5173",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 1000,
+                },
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                print(f"generate_backlog_from_prompt attempt {attempt+1} failed: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                continue
+            content = resp.json()["choices"][0]["message"]["content"]
+            result = _parse_json_response(content)
+            if result and isinstance(result, dict) and result.get("description"):
+                return {
+                    "description": result["description"].strip(),
+                    "priority": result.get("priority", "Medium"),
+                }
+            print(f"generate_backlog_from_prompt attempt {attempt+1}: could not parse valid result from: {content[:300]}", file=sys.stderr)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+        except Exception as e:
+            print(f"generate_backlog_from_prompt attempt {attempt+1} error: {e}", file=sys.stderr)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+
+    return None
+
+
 def _parse_json_response(content):
     if not content:
         return None

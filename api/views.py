@@ -285,6 +285,30 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
     queryset = BacklogItem.objects.all()
     serializer_class = BacklogItemSerializer
 
+    @action(detail=False, methods=['post'])
+    def generate_from_prompt(self, request):
+        """
+        Generate a backlog item from a free-form user prompt using AI.
+        Accepts POST body: {"prompt": "..."}
+        """
+        prompt = request.data.get('prompt', '').strip()
+        if not prompt:
+            return Response({'error': 'Prompt is required'}, status=400)
+
+        from .ai_service import generate_backlog_from_prompt
+        result = generate_backlog_from_prompt(prompt)
+        if not result:
+            return Response({'error': 'AI generation failed. Check your OpenRouter API key.'}, status=500)
+
+        # Create the backlog item with AI-generated data
+        backlog_item = BacklogItem.objects.create(
+            description=result['description'],
+            priority=result.get('priority', 'Medium'),
+            status='New',
+            source='manual',
+        )
+        return Response(BacklogItemSerializer(backlog_item).data, status=201)
+
     @action(detail=True, methods=['post'])
     def convert_to_task(self, request, pk=None):
         """Convert a backlog item into a Task automatically.
