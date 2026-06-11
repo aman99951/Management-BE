@@ -93,6 +93,9 @@ class NotificationSerializer(serializers.ModelSerializer):
 
 class BacklogItemSerializer(serializers.ModelSerializer):
     owner_name = serializers.CharField(source='owner.name', read_only=True, default=None)
+    task_id = serializers.IntegerField(source='created_task.id', read_only=True, default=None)
+    task_title = serializers.CharField(source='created_task.title', read_only=True, default=None)
+    task_status = serializers.CharField(source='created_task.status', read_only=True, default=None)
 
     class Meta:
         model = BacklogItem

@@ -285,6 +285,60 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
     queryset = BacklogItem.objects.all()
     serializer_class = BacklogItemSerializer
 
+    @action(detail=True, methods=['post'])
+    def convert_to_task(self, request, pk=None):
+        """Convert a backlog item into a Task automatically.
+        The task inherits description, priority, and owner from the backlog item.
+        """
+        backlog_item = self.get_object()
+
+        if backlog_item.created_task:
+            return Response({
+                'status': 'already_converted',
+                'task_id': backlog_item.created_task.id,
+                'task': TaskSerializer(backlog_item.created_task).data,
+            })
+
+        # Generate a concise title from first line/sentence
+        desc = backlog_item.description or ''
+        title = desc.split('\n')[0].strip()
+        if len(title) > 120:
+            title = title[:117] + '...'
+        if not title:
+            title = 'Untitled Backlog Item'
+
+        priority_map = {
+            'Low': 'low',
+            'Medium': 'medium',
+            'High': 'high',
+            'Critical': 'critical',
+        }
+        priority = priority_map.get(backlog_item.priority, 'medium')
+
+        task = Task.objects.create(
+            title=title,
+            description=desc,
+            assigned_to=backlog_item.owner,
+            priority=priority,
+            status='pending',
+            source='ai',
+        )
+
+        backlog_item.created_task = task
+        backlog_item.status = 'Reviewed'
+        backlog_item.save(update_fields=['created_task', 'status'])
+
+        # Send email notification if assignee exists
+        if task.assigned_to:
+            from .email_service import send_task_assignment_email
+            send_task_assignment_email(task)
+
+        return Response({
+            'status': 'converted',
+            'task': TaskSerializer(task).data,
+            'backlog_item': BacklogItemSerializer(backlog_item).data,
+        })
+
 
 @api_view(['POST'])
 def backlog_scan(request):
@@ -334,20 +388,6 @@ def backlog_scan(request):
                     'source': source,
                     'source_id': meeting.id,
                     'context': f'Meeting title: {meeting.title}, type: {source_type}',
-                })
-
-    # Scan task comments
-    for task in Task.objects.all():
-        for comment in task.comments.all():
-            if 'backlog' in (comment.text or '').lower():
-                source = f'Comment on: {task.title}'
-                if source in existing_refs:
-                    continue
-                candidates.append({
-                    'text': comment.text,
-                    'source': source,
-                    'source_id': task.id,
-                    'context': f'Comment on task: {task.title}',
                 })
 
     # AI verification
