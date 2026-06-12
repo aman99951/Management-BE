@@ -91,6 +91,21 @@ def fetch_meetings_from_fathom_by_title(title):
             return item
     return None
 
+def fetch_meeting_by_id(recording_id):
+    """Fetch a single meeting's full details (transcript + summary) from Fathom API."""
+    headers = fathom_headers()
+    if not headers:
+        return None
+    resp = requests.get(f"{FATHOM_API_BASE}/meetings/{recording_id}", headers=headers, params={
+        "include_summary": "true",
+        "include_action_items": "true",
+        "include_transcript": "true",
+    })
+    if resp.status_code != 200:
+        return None
+    return resp.json()
+
+
 def sync_meetings():
     data = fetch_meetings()
     if not data:

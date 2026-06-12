@@ -116,7 +116,7 @@ def _notify_task_assignees(tasks):
     Called automatically after task generation.
     """
     return send_batch_tasks_email(tasks)
-from .services import sync_meetings, process_webhook_payload, get_config, get_user_fathom_token, fathom_headers, FATHOM_API_BASE
+from .services import sync_meetings, process_webhook_payload, get_config, get_user_fathom_token, fathom_headers, FATHOM_API_BASE, fetch_transcript, fetch_meeting_by_id
 from .google_calendar import (create_meet_event, list_upcoming_events, sync_calendar_events, get_google_calendar_auth_url, get_google_calendar_credentials, resolve_calendar_state)
 from urllib.parse import urlencode
 
@@ -511,7 +511,12 @@ def fathom_config_view(request):
     return JsonResponse({'configured': True})
 
 def _auto_generate_tasks_for_meeting(meeting):
-    """Auto-generate AI tasks for a meeting. Skips meetings titled 'Fathom Demo'."""
+    """Auto-generate AI tasks for a meeting. Skips meetings titled 'Fathom Demo'.
+
+    If the meeting has a fathom_recording_id but no transcript/summary yet,
+    tries to fetch the transcript and summary from Fathom's API (useful when
+    the webhook arrives before Fathom has finished processing).
+    """
     title_lower = (meeting.title or '').lower().strip()
     if 'fathom demo' in title_lower:
         return 0
@@ -519,6 +524,41 @@ def _auto_generate_tasks_for_meeting(meeting):
     # Don't re-generate if AI tasks already exist
     if Task.objects.filter(meeting=meeting, source='ai').exists():
         return 0
+
+    # If transcript/summary is missing but we have a fathom_recording_id,
+    # try to fetch it from Fathom's API
+    if (not meeting.transcript or not meeting.summary) and meeting.fathom_recording_id:
+        fetched = fetch_meeting_by_id(meeting.fathom_recording_id)
+        if fetched:
+            # Fetch transcript separately if not included in the meeting payload
+            fetched_transcript = fetched.get('transcript')
+            if not fetched_transcript:
+                tdata = fetch_transcript(meeting.fathom_recording_id)
+                if tdata:
+                    fetched_transcript = tdata.get('transcript', tdata.get('items', tdata))
+
+            # Build summary from response
+            summary_data = fetched.get('default_summary')
+            fetched_summary = summary_data.get('markdown_formatted', '') if summary_data else ''
+            fetched_raw_summary = summary_data
+            fetched_action_items = fetched.get('action_items', meeting.raw_action_items or [])
+
+            # Save fetched data back to the meeting so future calls don't re-fetch
+            update_fields = []
+            if not meeting.transcript and fetched_transcript:
+                meeting.transcript = fetched_transcript
+                update_fields.append('transcript')
+            if not meeting.summary and fetched_summary:
+                meeting.summary = fetched_summary
+                update_fields.append('summary')
+            if not meeting.raw_summary and fetched_raw_summary:
+                meeting.raw_summary = fetched_raw_summary
+                update_fields.append('raw_summary')
+            if not meeting.raw_action_items and fetched_action_items:
+                meeting.raw_action_items = fetched_action_items
+                update_fields.append('raw_action_items')
+            if update_fields:
+                meeting.save(update_fields=update_fields)
 
     # Need transcript or summary to generate tasks
     if not meeting.transcript and not meeting.summary:
@@ -583,10 +623,8 @@ def fathom_webhook_view(request):
     if not serializer.is_valid():
         return Response(serializer.errors, status=400)
     meeting, created = process_webhook_payload(serializer.validated_data)
-    # Auto-generate tasks for newly webhook-created meetings
-    tasks_auto_generated = 0
-    if created:
-        tasks_auto_generated = _auto_generate_tasks_for_meeting(meeting)
+    # Auto-generate tasks even if meeting already existed (webhook retry may have more data)
+    tasks_auto_generated = _auto_generate_tasks_for_meeting(meeting)
     return Response({'meeting_id': meeting.id, 'created': created, 'auto_generated_tasks': tasks_auto_generated}, status=201)
 
 @api_view(['GET'])
