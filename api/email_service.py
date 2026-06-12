@@ -191,7 +191,12 @@ def send_task_assignment_email(task):
 
 def send_batch_tasks_email(tasks):
     """Send a single consolidated email with all tasks for an employee.
-    Groups tasks by employee and sends one email per employee."""
+    Groups tasks by employee and sends one email per employee.
+
+    Returns:
+        dict with 'sent_count', 'failed_count', and 'details' list
+        where each detail has 'employee_name', 'employee_email', 'task_count', 'sent'
+    """
     # Group tasks by employee
     grouped = {}
     for task in tasks:
@@ -202,7 +207,7 @@ def send_batch_tasks_email(tasks):
         grouped[emp.id]['tasks'].append(task)
 
     PRIORITY_ORDER = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
-    sent_count = 0
+    details = []
 
     for entry in grouped.values():
         emp = entry['employee']
@@ -242,17 +247,25 @@ def send_batch_tasks_email(tasks):
         text_lines.append("View full details on the dashboard.")
         text_body = '\n'.join(text_lines)
 
-        result = send_email(
+        sent = send_email(
             to_email=emp.email,
             subject=f"📋 {len(emp_tasks)} New Task{'s' if len(emp_tasks) != 1 else ''} for You",
             html_body=html_body,
             text_body=text_body,
             cc_list=TASK_CC_LIST,
         )
-        if result:
-            sent_count += 1
+        details.append({
+            'employee_name': emp.name,
+            'employee_email': emp.email,
+            'task_count': len(emp_tasks),
+            'sent': sent,
+        })
 
-    return sent_count
+    return {
+        'sent_count': sum(1 for d in details if d['sent']),
+        'failed_count': sum(1 for d in details if not d['sent']),
+        'details': details,
+    }
 
 
 # ── Meeting Emails ──

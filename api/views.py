@@ -114,6 +114,9 @@ def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date):
 def _notify_task_assignees(tasks):
     """Send a single consolidated email per employee with all their tasks grouped.
     Called automatically after task generation.
+
+    Returns:
+        dict with 'sent_count', 'failed_count', and 'details' list.
     """
     return send_batch_tasks_email(tasks)
 from .services import sync_meetings, process_webhook_payload, get_config, get_user_fathom_token, fathom_headers, FATHOM_API_BASE, fetch_transcript, fetch_meeting_by_id
@@ -144,10 +147,18 @@ class MeetingViewSet(viewsets.ModelViewSet):
     def batch_generate_tasks(self, request):
         """Auto-generate AI tasks for all meetings that have transcripts/summaries but no tasks yet."""
         total = 0
+        total_emails_sent = 0
+        total_emails_failed = 0
         for meeting in Meeting.objects.all():
-            count = _auto_generate_tasks_for_meeting(meeting)
-            total += count
-        return Response({'total_generated': total})
+            result = _auto_generate_tasks_for_meeting(meeting)
+            total += result['task_count']
+            total_emails_sent += result['email_status']['sent_count']
+            total_emails_failed += result['email_status']['failed_count']
+        return Response({
+            'total_generated': total,
+            'emails_sent': total_emails_sent,
+            'emails_failed': total_emails_failed,
+        })
 
     @action(detail=True, methods=['post'])
     def check_fathom(self, request, pk=None):
@@ -198,13 +209,15 @@ class MeetingViewSet(viewsets.ModelViewSet):
         created_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date)
 
         # Auto-send assignment emails to assignees
-        emailed = _notify_task_assignees(created_tasks)
+        email_result = _notify_task_assignees(created_tasks)
 
         from .serializers import TaskSerializer
         return Response({
             'status': 'created',
             'tasks': TaskSerializer(created_tasks, many=True).data,
-            'emails_sent': emailed,
+            'emails_sent': email_result['sent_count'],
+            'emails_failed': email_result['failed_count'],
+            'email_details': email_result['details'],
         })
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -518,12 +531,14 @@ def _auto_generate_tasks_for_meeting(meeting):
     the webhook arrives before Fathom has finished processing).
     """
     title_lower = (meeting.title or '').lower().strip()
+    _empty_result = {'task_count': 0, 'email_status': {'sent_count': 0, 'failed_count': 0, 'details': []}}
+
     if 'fathom demo' in title_lower:
-        return 0
+        return _empty_result
 
     # Don't re-generate if AI tasks already exist
     if Task.objects.filter(meeting=meeting, source='ai').exists():
-        return 0
+        return _empty_result
 
     # If transcript/summary is missing but we have a fathom_recording_id,
     # try to fetch it from Fathom's API
@@ -562,7 +577,7 @@ def _auto_generate_tasks_for_meeting(meeting):
 
     # Need transcript or summary to generate tasks
     if not meeting.transcript and not meeting.summary:
-        return 0
+        return _empty_result
 
     transcript_text = ''
     if meeting.transcript:
@@ -572,7 +587,7 @@ def _auto_generate_tasks_for_meeting(meeting):
             transcript_text += f"{speaker}: {text}\n"
 
     if not transcript_text and not meeting.summary:
-        return 0
+        return _empty_result
 
     # Include Fathom's own action items as a reference for the AI
     action_items_hint = ''
@@ -591,20 +606,23 @@ def _auto_generate_tasks_for_meeting(meeting):
     input_text += action_items_hint
 
     if not settings.OPENROUTER_API_KEY:
-        return 0
+        return _empty_result
 
     from .ai_service import generate_tasks_from_summary
     ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
     if not ai_tasks or not isinstance(ai_tasks, list):
-        return 0
+        return _empty_result
 
     meeting_date = meeting.recorded_at or meeting.created_at
     created_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date)
 
     # Send one consolidated email per employee
-    send_batch_tasks_email(created_tasks)
+    email_result = send_batch_tasks_email(created_tasks)
 
-    return len(created_tasks)
+    return {
+        'task_count': len(created_tasks),
+        'email_status': email_result,
+    }
 
 
 @csrf_exempt
@@ -613,9 +631,18 @@ def fathom_sync_view(request):
     new_meetings, count = sync_meetings()
     # Auto-generate tasks for newly synced meetings
     auto_generated = 0
+    all_email_details = []
     for meeting in new_meetings:
-        auto_generated += _auto_generate_tasks_for_meeting(meeting)
-    return JsonResponse({'synced': count, 'auto_generated_tasks': auto_generated})
+        result = _auto_generate_tasks_for_meeting(meeting)
+        auto_generated += result['task_count']
+        if result['email_status']['details']:
+            all_email_details.extend(result['email_status']['details'])
+    return JsonResponse({
+        'synced': count,
+        'auto_generated_tasks': auto_generated,
+        'emails_sent': sum(1 for d in all_email_details if d['sent']),
+        'emails_failed': sum(1 for d in all_email_details if not d['sent']),
+    })
 
 @api_view(['POST'])
 def fathom_webhook_view(request):
@@ -624,8 +651,15 @@ def fathom_webhook_view(request):
         return Response(serializer.errors, status=400)
     meeting, created = process_webhook_payload(serializer.validated_data)
     # Auto-generate tasks even if meeting already existed (webhook retry may have more data)
-    tasks_auto_generated = _auto_generate_tasks_for_meeting(meeting)
-    return Response({'meeting_id': meeting.id, 'created': created, 'auto_generated_tasks': tasks_auto_generated}, status=201)
+    result = _auto_generate_tasks_for_meeting(meeting)
+    return Response({
+        'meeting_id': meeting.id,
+        'created': created,
+        'auto_generated_tasks': result['task_count'],
+        'emails_sent': result['email_status']['sent_count'],
+        'emails_failed': result['email_status']['failed_count'],
+        'email_details': result['email_status']['details'],
+    }, status=201)
 
 @api_view(['GET'])
 def dashboard_stats(request):
@@ -1013,10 +1047,18 @@ def generate_ai_tasks(request):
         total += len(new_tasks)
 
     # Send one consolidated email per employee
+    email_result = {'sent_count': 0, 'failed_count': 0, 'details': []}
     if all_new_tasks:
-        send_batch_tasks_email(all_new_tasks)
+        email_result = send_batch_tasks_email(all_new_tasks)
 
-    return JsonResponse({'status': 'completed', 'tasks_created': total, 'message': f'{total} AI tasks generated across all meetings.'})
+    return JsonResponse({
+        'status': 'completed',
+        'tasks_created': total,
+        'emails_sent': email_result['sent_count'],
+        'emails_failed': email_result['failed_count'],
+        'email_details': email_result['details'],
+        'message': f'{total} AI tasks generated across all meetings.',
+    })
 
 
 # ── Google Calendar / Google Meet Views ──
