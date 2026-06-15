@@ -63,35 +63,83 @@ def _generate_title_from_description(description):
     return first_sentence if first_sentence else 'Untitled Task'
 
 
-def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date):
+def _create_tasks_from_fathom_action_items(meeting):
+    """Create Task objects directly from Fathom's raw_action_items (source='fathom').
+    These are explicitly captured during the meeting and are the authoritative source.
+    Uses assignee email for reliable employee matching. 100% capture guaranteed.
+    """
+    if not meeting.raw_action_items:
+        return []
+
+    created = []
+    meeting_date = meeting.recorded_at or meeting.created_at
+    seen_dedup_keys = set()
+
+    for item in meeting.raw_action_items:
+        description = (item.get('description') or '').strip()
+        if not description:
+            continue
+
+        assignee_data = item.get('assignee') or {}
+        assignee_name = assignee_data.get('name', '') or ''
+
+        dedup_key = (description.lower().strip()[:80], assignee_name.lower().strip())
+        if dedup_key in seen_dedup_keys:
+            continue
+        seen_dedup_keys.add(dedup_key)
+
+        employee = None
+        email = assignee_data.get('email')
+        if email:
+            employee = Employee.objects.filter(email__iexact=email).first()
+        if not employee:
+            name = assignee_data.get('name', '')
+            if name:
+                employee = _match_employee(name)
+
+        title = _generate_title_from_description(description)
+
+        task = Task.objects.create(
+            title=title,
+            description=description,
+            assigned_to=employee,
+            meeting=meeting,
+            status='pending',
+            priority='medium',
+            source='fathom',
+            created_at=meeting_date,
+        )
+        created.append(task)
+
+    return created
+
+
+def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date, existing_descriptions=None):
     """Shared logic to create Task objects from AI response list.
     Handles title fallback, employee matching, and deduplication.
+    existing_descriptions: optional set of normalized descriptions to skip (for Fathom/AI dedup).
     """
     created_tasks = []
-    seen_descriptions = set()
+    seen_descriptions = set(existing_descriptions or [])
 
     for t in ai_tasks:
         desc = t.get('description', '')
         if isinstance(desc, list):
             desc = '\n'.join(f'- {item}' for item in desc)
 
-        # Deduplicate: skip if very similar description already created
         desc_lower = desc.lower().strip()[:80]
         if desc_lower in seen_descriptions:
             continue
         seen_descriptions.add(desc_lower)
 
-        # Title: use AI title or generate from description
         title = t.get('title', '').strip()
         if not title or title.lower() == 'untitled task' or title.lower() == 'untitled':
             title = _generate_title_from_description(desc)
         title = title[:500]
 
-        # Employee matching
         assignee_name = t.get('assignee')
         employee = _match_employee(assignee_name) if assignee_name else None
 
-        # Priority
         priority = t.get('priority', 'medium')
         if priority not in dict(Task.PRIORITY_CHOICES):
             priority = 'medium'
@@ -173,8 +221,13 @@ class MeetingViewSet(viewsets.ModelViewSet):
     def generate_tasks(self, request, pk=None):
         meeting = self.get_object()
 
-        Task.objects.filter(meeting=meeting, source='ai').delete()
+        # Remove existing auto-generated tasks so we fully regenerate
+        Task.objects.filter(meeting=meeting, source__in=['fathom', 'ai']).delete()
 
+        # Phase 1: Create tasks directly from Fathom raw_action_items (authoritative)
+        fathom_tasks = _create_tasks_from_fathom_action_items(meeting)
+
+        # Phase 2: Supplement with AI from transcript
         transcript_text = ''
         if meeting.transcript:
             for entry in meeting.transcript:
@@ -182,7 +235,6 @@ class MeetingViewSet(viewsets.ModelViewSet):
                 text = entry.get('text', '')
                 transcript_text += f"{speaker}: {text}\n"
 
-        # Include Fathom's own action items as a reference for the AI
         action_items_hint = ''
         if meeting.raw_action_items:
             action_items_hint = '\nFathom already detected these action items (use as reference):\n'
@@ -196,25 +248,29 @@ class MeetingViewSet(viewsets.ModelViewSet):
             input_text += f"Transcript:\n{transcript_text}\n"
         input_text += action_items_hint
 
-        if not settings.OPENROUTER_API_KEY:
-            return Response({'error': 'OpenRouter API key not configured. Set OPENROUTER_API_KEY in backend settings.'}, status=400)
+        ai_created_tasks = []
+        if settings.OPENROUTER_API_KEY:
+            from .ai_service import generate_tasks_from_summary
+            ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
+            if ai_tasks and isinstance(ai_tasks, list):
+                meeting_date = meeting.recorded_at or meeting.created_at
+                existing_descriptions = set()
+                for t in fathom_tasks:
+                    existing_descriptions.add(t.description.lower().strip()[:80])
+                ai_created_tasks = _create_tasks_from_ai_list(
+                    ai_tasks, meeting, meeting_date,
+                    existing_descriptions=existing_descriptions,
+                )
 
-        from .ai_service import generate_tasks_from_summary
-
-        ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
-        if not ai_tasks or not isinstance(ai_tasks, list):
-            return Response({'status': 'failed', 'error': f'AI returned no valid tasks. Model={settings.OPENROUTER_MODEL}, API key set={"yes" if settings.OPENROUTER_API_KEY else "no"}, input_len={len(input_text)}'}, status=500)
-
-        meeting_date = meeting.recorded_at or meeting.created_at
-        created_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date)
-
-        # Auto-send assignment emails to assignees
-        email_result = _notify_task_assignees(created_tasks)
+        all_created = fathom_tasks + ai_created_tasks
+        email_result = _notify_task_assignees(all_created)
 
         from .serializers import TaskSerializer
         return Response({
             'status': 'created',
-            'tasks': TaskSerializer(created_tasks, many=True).data,
+            'fathom_task_count': len(fathom_tasks),
+            'ai_task_count': len(ai_created_tasks),
+            'tasks': TaskSerializer(all_created, many=True).data,
             'emails_sent': email_result['sent_count'],
             'emails_failed': email_result['failed_count'],
             'email_details': email_result['details'],
@@ -505,30 +561,48 @@ def fathom_config_view(request):
     if request.method == 'GET':
         config = get_config()
         if not config:
-            return JsonResponse({'configured': False})
-        return JsonResponse({'configured': True})
+            return JsonResponse({'configured': False, 'email_notifications_enabled': True})
+        return JsonResponse({
+            'configured': True,
+            'email_notifications_enabled': config.email_notifications_enabled,
+        })
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    config = get_config()
+
+    # Handle single-field updates (e.g. just toggling email)
+    partial_update = 'api_key' not in data and 'webhook_secret' not in data
+    if config and partial_update:
+        for key, val in data.items():
+            if hasattr(config, key):
+                setattr(config, key, val)
+        config.save()
+        return JsonResponse({'configured': True, 'email_notifications_enabled': config.email_notifications_enabled})
+
     serializer = FathomConfigSerializer(data=data)
     if not serializer.is_valid():
         return JsonResponse(serializer.errors, status=400)
-    config = get_config()
     if config:
         for key, val in serializer.validated_data.items():
             setattr(config, key, val)
         config.save()
     else:
         config = FathomConfig.objects.create(**serializer.validated_data)
-    return JsonResponse({'configured': True})
+    return JsonResponse({'configured': True, 'email_notifications_enabled': config.email_notifications_enabled})
 
 def _auto_generate_tasks_for_meeting(meeting):
-    """Auto-generate AI tasks for a meeting. Skips meetings titled 'Fathom Demo'.
+    """Auto-generate tasks for a meeting. Two-phase approach:
 
-    If the meeting has a fathom_recording_id but no transcript/summary yet,
-    tries to fetch the transcript and summary from Fathom's API (useful when
-    the webhook arrives before Fathom has finished processing).
+    Phase 1: Create tasks directly from Fathom's raw_action_items (source='fathom').
+             These are explicitly captured during the meeting and are authoritative.
+
+    Phase 2: Run AI on the transcript to supplement with additional tasks the
+             Fathom AI might have missed. AI tasks are deduplicated against Phase 1.
+
+    Skips meetings titled 'Fathom Demo'. If transcript/summary is missing but a
+    fathom_recording_id exists, tries to fetch from Fathom's API first.
     """
     title_lower = (meeting.title or '').lower().strip()
     _empty_result = {'task_count': 0, 'email_status': {'sent_count': 0, 'failed_count': 0, 'details': []}}
@@ -536,29 +610,22 @@ def _auto_generate_tasks_for_meeting(meeting):
     if 'fathom demo' in title_lower:
         return _empty_result
 
-    # Don't re-generate if AI tasks already exist
-    if Task.objects.filter(meeting=meeting, source='ai').exists():
-        return _empty_result
-
     # If transcript/summary is missing but we have a fathom_recording_id,
     # try to fetch it from Fathom's API
     if (not meeting.transcript or not meeting.summary) and meeting.fathom_recording_id:
         fetched = fetch_meeting_by_id(meeting.fathom_recording_id)
         if fetched:
-            # Fetch transcript separately if not included in the meeting payload
             fetched_transcript = fetched.get('transcript')
             if not fetched_transcript:
                 tdata = fetch_transcript(meeting.fathom_recording_id)
                 if tdata:
                     fetched_transcript = tdata.get('transcript', tdata.get('items', tdata))
 
-            # Build summary from response
             summary_data = fetched.get('default_summary')
             fetched_summary = summary_data.get('markdown_formatted', '') if summary_data else ''
             fetched_raw_summary = summary_data
             fetched_action_items = fetched.get('action_items', meeting.raw_action_items or [])
 
-            # Save fetched data back to the meeting so future calls don't re-fetch
             update_fields = []
             if not meeting.transcript and fetched_transcript:
                 meeting.transcript = fetched_transcript
@@ -575,53 +642,78 @@ def _auto_generate_tasks_for_meeting(meeting):
             if update_fields:
                 meeting.save(update_fields=update_fields)
 
-    # Need transcript or summary to generate tasks
-    if not meeting.transcript and not meeting.summary:
-        return _empty_result
+    total_count = 0
+    all_email_details = []
 
-    transcript_text = ''
-    if meeting.transcript:
-        for entry in meeting.transcript:
-            speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
-            text = entry.get('text', '')
-            transcript_text += f"{speaker}: {text}\n"
-
-    if not transcript_text and not meeting.summary:
-        return _empty_result
-
-    # Include Fathom's own action items as a reference for the AI
-    action_items_hint = ''
+    # Phase 1: Create tasks DIRECTLY from Fathom raw_action_items (authoritative)
+    fathom_created = []
     if meeting.raw_action_items:
-        action_items_hint = '\nFathom already detected these action items (use as reference):\n'
-        for ai in meeting.raw_action_items:
-            assignee = ai.get('assignee', {}).get('name', 'Unknown') if ai.get('assignee') else 'Unknown'
-            desc = ai.get('description', '')
-            action_items_hint += f'- {assignee}: {desc}\n'
+        existing_fathom_count = Task.objects.filter(meeting=meeting, source='fathom').count()
+        if existing_fathom_count == 0:
+            fathom_created = _create_tasks_from_fathom_action_items(meeting)
+            if fathom_created:
+                total_count += len(fathom_created)
+                result = send_batch_tasks_email(fathom_created)
+                if result.get('details'):
+                    all_email_details.extend(result['details'])
 
-    input_text = f"Meeting Title: {meeting.title}\n\n"
-    if transcript_text:
-        input_text += f"Transcript:\n{transcript_text}\n"
-    elif meeting.summary:
-        input_text += f"Summary:\n{meeting.summary}\n"
-    input_text += action_items_hint
+    # Phase 2: Supplement with AI from transcript (skip if AI tasks already exist)
+    ai_created = []
+    if not Task.objects.filter(meeting=meeting, source='ai').exists():
+        if not meeting.transcript and not meeting.summary:
+            pass  # No transcript/summary to run AI on
+        else:
+            transcript_text = ''
+            if meeting.transcript:
+                for entry in meeting.transcript:
+                    speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
+                    text = entry.get('text', '')
+                    transcript_text += f"{speaker}: {text}\n"
 
-    if not settings.OPENROUTER_API_KEY:
-        return _empty_result
+            if transcript_text or meeting.summary:
+                action_items_hint = ''
+                if meeting.raw_action_items:
+                    action_items_hint = '\nFathom already detected these action items (use as reference):\n'
+                    for ai in meeting.raw_action_items:
+                        assignee = ai.get('assignee', {}).get('name', 'Unknown') if ai.get('assignee') else 'Unknown'
+                        desc = ai.get('description', '')
+                        action_items_hint += f'- {assignee}: {desc}\n'
 
-    from .ai_service import generate_tasks_from_summary
-    ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
-    if not ai_tasks or not isinstance(ai_tasks, list):
-        return _empty_result
+                input_text = f"Meeting Title: {meeting.title}\n\n"
+                if transcript_text:
+                    input_text += f"Transcript:\n{transcript_text}\n"
+                elif meeting.summary:
+                    input_text += f"Summary:\n{meeting.summary}\n"
+                input_text += action_items_hint
 
-    meeting_date = meeting.recorded_at or meeting.created_at
-    created_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date)
+                if settings.OPENROUTER_API_KEY:
+                    from .ai_service import generate_tasks_from_summary
+                    ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
+                    if ai_tasks and isinstance(ai_tasks, list):
+                        meeting_date = meeting.recorded_at or meeting.created_at
+                        # Dedup: collect Fathom descriptions so AI doesn't duplicate them
+                        existing_descriptions = set()
+                        for t in Task.objects.filter(meeting=meeting, source='fathom'):
+                            existing_descriptions.add(t.description.lower().strip()[:80])
+                        ai_created = _create_tasks_from_ai_list(
+                            ai_tasks, meeting, meeting_date,
+                            existing_descriptions=existing_descriptions,
+                        )
+                        if ai_created:
+                            total_count += len(ai_created)
+                            result = send_batch_tasks_email(ai_created)
+                            if result.get('details'):
+                                all_email_details.extend(result['details'])
 
-    # Send one consolidated email per employee
-    email_result = send_batch_tasks_email(created_tasks)
+    all_tasks = fathom_created + ai_created
 
     return {
-        'task_count': len(created_tasks),
-        'email_status': email_result,
+        'task_count': len(all_tasks),
+        'email_status': {
+            'sent_count': sum(1 for d in all_email_details if d.get('sent')),
+            'failed_count': sum(1 for d in all_email_details if not d.get('sent')),
+            'details': all_email_details,
+        },
     }
 
 

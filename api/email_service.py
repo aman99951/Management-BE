@@ -4,6 +4,9 @@ Email service for sending notifications and action items.
 Uses Django HTML email templates in api/templates/email/ for rendering.
 In development (default) it prints to the console via console.EmailBackend.
 Configure SMTP in .env for real deliveries.
+
+All email sending respects the site-wide `email_notifications_enabled` toggle
+in FathomConfig. When disabled, no emails are sent.
 """
 import logging
 from django.core.mail import EmailMultiAlternatives
@@ -11,7 +14,7 @@ from django.template.loader import render_to_string
 from django.conf import settings
 from django.utils import timezone
 import os
-from .models import Employee, Task, ScheduledMeeting
+from .models import Employee, Task, ScheduledMeeting, FathomConfig
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +29,28 @@ def _get_frontend_url():
 TASK_CC_LIST = ['gajendran@mgtechnosolutions.com', 'sekar@mgtechnosolutions.com']
 
 
+# ── Master toggle ──
+
+def _email_notifications_enabled():
+    """Check the site-wide email notification toggle.
+    Returns False if the setting exists and is explicitly disabled.
+    Defaults to True (enabled) if no config row exists yet.
+    """
+    config = FathomConfig.objects.first()
+    if config is None:
+        return True
+    return config.email_notifications_enabled
+
+
 # ── Core send function ──
 
 def send_email(to_email, subject, html_body, text_body=None, cc_list=None):
-    """Send a single email. Returns True on success."""
+    """Send a single email. Respects the email_notifications_enabled toggle.
+    Returns True on success.
+    """
+    if not _email_notifications_enabled():
+        logger.info(f"send_email skipped: email notifications disabled (subject={subject[:50]})")
+        return False
     if not to_email:
         logger.warning(f"send_email skipped: no recipient email (subject={subject[:50]})")
         return False

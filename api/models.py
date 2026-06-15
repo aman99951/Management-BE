@@ -75,6 +75,7 @@ class Comment(models.Model):
 class FathomConfig(models.Model):
     api_key = models.CharField(max_length=500)
     webhook_secret = models.CharField(max_length=500, blank=True)
+    email_notifications_enabled = models.BooleanField(default=True, help_text='Master toggle for all email notifications (task assignments, meeting invites, etc.)')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

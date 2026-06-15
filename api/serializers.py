@@ -61,10 +61,11 @@ class TaskSerializer(serializers.ModelSerializer):
 class FathomConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = FathomConfig
-        fields = ['api_key', 'webhook_secret']
+        fields = ['api_key', 'webhook_secret', 'email_notifications_enabled']
         extra_kwargs = {
             'api_key': {'write_only': True},
             'webhook_secret': {'write_only': True},
+            'email_notifications_enabled': {'read_only': False},
         }
 
 class ScheduledMeetingSerializer(serializers.ModelSerializer):
