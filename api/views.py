@@ -67,6 +67,8 @@ def _create_tasks_from_fathom_action_items(meeting):
     """Create Task objects directly from Fathom's raw_action_items (source='fathom').
     These are explicitly captured during the meeting and are the authoritative source.
     Uses assignee email for reliable employee matching. 100% capture guaranteed.
+    Checks DB for existing tasks with same (meeting, title, assigned_to) to prevent
+    cross-source duplicates.
     """
     if not meeting.raw_action_items:
         return []
@@ -99,6 +101,9 @@ def _create_tasks_from_fathom_action_items(meeting):
 
         title = _generate_title_from_description(description)
 
+        if Task.objects.filter(meeting=meeting, title__iexact=title, assigned_to=employee).exists():
+            continue
+
         task = Task.objects.create(
             title=title,
             description=description,
@@ -118,6 +123,8 @@ def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date, existing_descrip
     """Shared logic to create Task objects from AI response list.
     Handles title fallback, employee matching, and deduplication.
     existing_descriptions: optional set of normalized descriptions to skip (for Fathom/AI dedup).
+    Also checks DB for existing tasks with same (meeting, title, assigned_to) to prevent
+    cross-source duplicates regardless of description wording differences.
     """
     created_tasks = []
     seen_descriptions = set(existing_descriptions or [])
@@ -139,6 +146,9 @@ def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date, existing_descrip
 
         assignee_name = t.get('assignee')
         employee = _match_employee(assignee_name) if assignee_name else None
+
+        if Task.objects.filter(meeting=meeting, title__iexact=title, assigned_to=employee).exists():
+            continue
 
         priority = t.get('priority', 'medium')
         if priority not in dict(Task.PRIORITY_CHOICES):
@@ -1134,7 +1144,10 @@ def generate_ai_tasks(request):
         if not ai_tasks or not isinstance(ai_tasks, list):
             continue
         meeting_date = meeting.recorded_at or meeting.created_at
-        new_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date)
+        existing_descriptions = set()
+        for t in Task.objects.filter(meeting=meeting, source='fathom'):
+            existing_descriptions.add(t.description.lower().strip()[:80])
+        new_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date, existing_descriptions=existing_descriptions)
         all_new_tasks.extend(new_tasks)
         total += len(new_tasks)
 
