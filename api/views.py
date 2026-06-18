@@ -234,43 +234,31 @@ class MeetingViewSet(viewsets.ModelViewSet):
         # Remove existing auto-generated tasks so we fully regenerate
         Task.objects.filter(meeting=meeting, source__in=['fathom', 'ai']).delete()
 
-        # Phase 1: Create tasks directly from Fathom raw_action_items (authoritative)
-        fathom_tasks = _create_tasks_from_fathom_action_items(meeting)
+        fathom_tasks = []
+        ai_created_tasks = []
 
-        # Phase 2: Supplement with AI from transcript
-        transcript_text = ''
-        if meeting.transcript:
+        if meeting.raw_action_items:
+            # Phase 1: Create tasks directly from Fathom raw_action_items (authoritative)
+            fathom_tasks = _create_tasks_from_fathom_action_items(meeting)
+            # Enrich their descriptions with AI from transcript instead of creating separate AI tasks
+            _enrich_fathom_tasks(meeting, fathom_tasks)
+        elif meeting.transcript and settings.OPENROUTER_API_KEY:
+            # Fallback: No Fathom items, use AI to generate tasks from transcript
+            transcript_text = ''
             for entry in meeting.transcript:
                 speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
                 text = entry.get('text', '')
                 transcript_text += f"{speaker}: {text}\n"
 
-        action_items_hint = ''
-        if meeting.raw_action_items:
-            action_items_hint = '\nFathom already detected these action items (use as reference):\n'
-            for ai in meeting.raw_action_items:
-                assignee = ai.get('assignee', {}).get('name', 'Unknown') if ai.get('assignee') else 'Unknown'
-                desc = ai.get('description', '')
-                action_items_hint += f'- {assignee}: {desc}\n'
-
-        input_text = f"Meeting Title: {meeting.title}\n\n"
-        if transcript_text:
-            input_text += f"Transcript:\n{transcript_text}\n"
-        input_text += action_items_hint
-
-        ai_created_tasks = []
-        if settings.OPENROUTER_API_KEY:
-            from .ai_service import generate_tasks_from_summary
-            ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
-            if ai_tasks and isinstance(ai_tasks, list):
-                meeting_date = meeting.recorded_at or meeting.created_at
-                existing_descriptions = set()
-                for t in fathom_tasks:
-                    existing_descriptions.add(t.description.lower().strip()[:80])
-                ai_created_tasks = _create_tasks_from_ai_list(
-                    ai_tasks, meeting, meeting_date,
-                    existing_descriptions=existing_descriptions,
-                )
+            if transcript_text:
+                input_text = f"Meeting Title: {meeting.title}\n\nTranscript:\n{transcript_text}\n"
+                from .ai_service import generate_tasks_from_summary
+                ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
+                if ai_tasks and isinstance(ai_tasks, list):
+                    meeting_date = meeting.recorded_at or meeting.created_at
+                    ai_created_tasks = _create_tasks_from_ai_list(
+                        ai_tasks, meeting, meeting_date,
+                    )
 
         all_created = fathom_tasks + ai_created_tasks
         email_result = _notify_task_assignees(all_created)
@@ -602,14 +590,45 @@ def fathom_config_view(request):
         config = FathomConfig.objects.create(**serializer.validated_data)
     return JsonResponse({'configured': True, 'email_notifications_enabled': config.email_notifications_enabled})
 
+def _enrich_fathom_tasks(meeting, fathom_tasks):
+    """Enrich Fathom task descriptions with context from the transcript using AI."""
+    if not fathom_tasks or not meeting.transcript:
+        return
+
+    if not settings.OPENROUTER_API_KEY:
+        return
+
+    transcript_text = ''
+    for entry in meeting.transcript:
+        speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
+        text = entry.get('text', '')
+        transcript_text += f"{speaker}: {text}\n"
+
+    if not transcript_text:
+        return
+
+    from .ai_service import enrich_fathom_task_descriptions
+    enriched = enrich_fathom_task_descriptions(transcript_text, meeting.title, fathom_tasks)
+    if not enriched:
+        return
+
+    id_map = {item['id']: item['enriched_description'] for item in enriched if 'id' in item and 'enriched_description' in item}
+    for i, task in enumerate(fathom_tasks):
+        idx = i + 1  # 1-based index matching the AI prompt
+        enriched_desc = id_map.get(idx)
+        if enriched_desc and enriched_desc != task.description:
+            task.description = enriched_desc
+            task.save(update_fields=['description'])
+
+
 def _auto_generate_tasks_for_meeting(meeting):
-    """Auto-generate tasks for a meeting. Two-phase approach:
+    """Auto-generate tasks for a meeting.
 
-    Phase 1: Create tasks directly from Fathom's raw_action_items (source='fathom').
-             These are explicitly captured during the meeting and are authoritative.
+    When Fathom raw_action_items exist: creates tasks from them (source='fathom'),
+    then enriches descriptions with AI from the transcript. Never creates duplicate
+    AI tasks alongside Fathom tasks.
 
-    Phase 2: Run AI on the transcript to supplement with additional tasks the
-             Fathom AI might have missed. AI tasks are deduplicated against Phase 1.
+    When no Fathom items but transcript exists: falls back to AI generation (source='ai').
 
     Skips meetings titled 'Fathom Demo'. If transcript/summary is missing but a
     fathom_recording_id exists, tries to fetch from Fathom's API first.
@@ -667,9 +686,15 @@ def _auto_generate_tasks_for_meeting(meeting):
                 if result.get('details'):
                     all_email_details.extend(result['details'])
 
-    # Phase 2: Supplement with AI from transcript (skip if AI tasks already exist)
+    # Enrichment step: If Fathom tasks were created and we have a transcript,
+    # enrich descriptions with AI context instead of creating duplicate AI tasks
+    if fathom_created and meeting.transcript and settings.OPENROUTER_API_KEY:
+        _enrich_fathom_tasks(meeting, fathom_created)
+
+    # Phase 2: ONLY run AI generation if Fathom had no raw_action_items
+    # (fallback for meetings without Fathom action item capture)
     ai_created = []
-    if not Task.objects.filter(meeting=meeting, source='ai').exists():
+    if not meeting.raw_action_items and not Task.objects.filter(meeting=meeting, source='ai').exists():
         if not meeting.transcript and not meeting.summary:
             pass  # No transcript/summary to run AI on
         else:
@@ -681,33 +706,19 @@ def _auto_generate_tasks_for_meeting(meeting):
                     transcript_text += f"{speaker}: {text}\n"
 
             if transcript_text or meeting.summary:
-                action_items_hint = ''
-                if meeting.raw_action_items:
-                    action_items_hint = '\nFathom already detected these action items (use as reference):\n'
-                    for ai in meeting.raw_action_items:
-                        assignee = ai.get('assignee', {}).get('name', 'Unknown') if ai.get('assignee') else 'Unknown'
-                        desc = ai.get('description', '')
-                        action_items_hint += f'- {assignee}: {desc}\n'
-
                 input_text = f"Meeting Title: {meeting.title}\n\n"
                 if transcript_text:
                     input_text += f"Transcript:\n{transcript_text}\n"
                 elif meeting.summary:
                     input_text += f"Summary:\n{meeting.summary}\n"
-                input_text += action_items_hint
 
                 if settings.OPENROUTER_API_KEY:
                     from .ai_service import generate_tasks_from_summary
                     ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
                     if ai_tasks and isinstance(ai_tasks, list):
                         meeting_date = meeting.recorded_at or meeting.created_at
-                        # Dedup: collect Fathom descriptions so AI doesn't duplicate them
-                        existing_descriptions = set()
-                        for t in Task.objects.filter(meeting=meeting, source='fathom'):
-                            existing_descriptions.add(t.description.lower().strip()[:80])
                         ai_created = _create_tasks_from_ai_list(
                             ai_tasks, meeting, meeting_date,
-                            existing_descriptions=existing_descriptions,
                         )
                         if ai_created:
                             total_count += len(ai_created)
@@ -1121,6 +1132,10 @@ def generate_ai_tasks(request):
     all_new_tasks = []
     meetings = Meeting.objects.exclude(transcript__isnull=True).exclude(transcript=[])
     for meeting in meetings:
+        if meeting.raw_action_items:
+            # Fathom already captured action items — skip AI generation to avoid duplicates
+            # (auto-generation already enriched Fathom tasks with transcript context)
+            continue
         if Task.objects.filter(meeting=meeting, source='ai').exists():
             continue
         transcript_text = ''
@@ -1129,25 +1144,14 @@ def generate_ai_tasks(request):
                 speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
                 text = entry.get('text', '')
                 transcript_text += f"{speaker}: {text}\n"
-        action_items_hint = ''
-        if meeting.raw_action_items:
-            action_items_hint = '\nFathom already detected these action items (use as reference):\n'
-            for ai in meeting.raw_action_items:
-                assignee = ai.get('assignee', {}).get('name', 'Unknown') if ai.get('assignee') else 'Unknown'
-                desc = ai.get('description', '')
-                action_items_hint += f'- {assignee}: {desc}\n'
         input_text = f"Meeting Title: {meeting.title}\n\n"
         if transcript_text:
             input_text += f"Transcript:\n{transcript_text}\n"
-        input_text += action_items_hint
         ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
         if not ai_tasks or not isinstance(ai_tasks, list):
             continue
         meeting_date = meeting.recorded_at or meeting.created_at
-        existing_descriptions = set()
-        for t in Task.objects.filter(meeting=meeting, source='fathom'):
-            existing_descriptions.add(t.description.lower().strip()[:80])
-        new_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date, existing_descriptions=existing_descriptions)
+        new_tasks = _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date)
         all_new_tasks.extend(new_tasks)
         total += len(new_tasks)
 

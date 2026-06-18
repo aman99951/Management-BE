@@ -94,6 +94,79 @@ Transcript:
     return None
 
 
+def enrich_fathom_task_descriptions(transcript_text, meeting_title, fathom_tasks):
+    """Given Fathom action items and the full transcript, enrich each task's
+    description with relevant context from the transcript. Returns a list of
+    dicts with 'id' and 'enriched_description', or None on failure."""
+    api_key = settings.OPENROUTER_API_KEY
+    if not api_key:
+        return None
+
+    model = settings.OPENROUTER_MODEL
+    if len(transcript_text) > MAX_INPUT_CHARS:
+        transcript_text = transcript_text[:MAX_INPUT_CHARS] + "\n\n[Note: transcript truncated due to length]"
+
+    tasks_block = '\n'.join(
+        f"{i+1}. Title: {t.title}\n   Current description: {t.description}"
+        for i, t in enumerate(fathom_tasks)
+    )
+
+    prompt = f"""You are a task description enhancer. You are given action items that were captured during a meeting (via Fathom), and the full meeting transcript.
+
+For each action item:
+1. Find the relevant discussion in the transcript where this task was discussed
+2. Expand the description with specific details, requirements, context, and deadlines mentioned in the transcript
+3. Keep the original meaning — just make it more detailed and specific
+4. If the transcript has no additional context for a task, leave the description as-is
+
+CRITICAL: Return ONLY a valid JSON array of objects with keys "id" (the number from the list above) and "enriched_description" (the expanded description). No commentary, no markdown.
+
+Meeting: {meeting_title}
+
+Action Items:
+{tasks_block}
+
+Transcript:
+{transcript_text}"""
+
+    import time
+    MAX_ATTEMPTS = 3
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            resp = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "http://localhost:5173",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 4096,
+                },
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                print(f"enrich_fathom attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
+                if attempt < MAX_ATTEMPTS - 1:
+                    time.sleep(2 ** attempt)
+                continue
+            content = resp.json()["choices"][0]["message"]["content"]
+            result = _parse_json_response(content)
+            if result and isinstance(result, list) and len(result) > 0:
+                return result
+            if attempt < MAX_ATTEMPTS - 1:
+                time.sleep(2 ** attempt)
+        except Exception as e:
+            print(f"enrich_fathom attempt {attempt+1} error: {e}", file=sys.stderr)
+            if attempt < MAX_ATTEMPTS - 1:
+                time.sleep(2 ** attempt)
+
+    return None
+
+
 def analyze_meeting_for_enhancements(meeting_text, meeting_title):
     """
     Analyze a full meeting transcript/summary to extract structured product enhancement ideas,
