@@ -505,6 +505,7 @@ def backlog_scan(request):
         for item in enhancements:
             item['meeting_id'] = meeting.id
             item['meeting_title'] = meeting.title
+            item['meeting_date'] = meeting.recorded_at
             item['source_ref'] = meeting_ref
             all_enhancements.append(item)
 
@@ -538,10 +539,12 @@ def backlog_scan(request):
             status='Future Consideration',
             source='auto-capture',
             source_ref=item.get('source_ref', ''),
+            meeting_date=item.get('meeting_date'),
         )
         created_count += 1
 
         # Return structured data to frontend
+        md = item.get('meeting_date')
         created_items.append({
             'id': backlog_item.id,
             'title': item.get('title', ''),
@@ -553,6 +556,7 @@ def backlog_scan(request):
             'source_of_idea': item.get('source_of_idea', ''),
             'source': f'Meeting: {item.get("meeting_title", "")}',
             'meeting_title': item.get('meeting_title', ''),
+            'meeting_date': md.isoformat() if md else None,
             'created_at': backlog_item.created_at.isoformat(),
         })
 
