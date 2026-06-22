@@ -434,7 +434,11 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
 @api_view(['POST'])
 def backlog_scan(request):
     """AI-powered scan: analyze full meeting conversations to extract structured product enhancement ideas.
-    Accepts optional POST body: {"days_back": N} — only scans meetings from last N days (default: 1)."""
+    Accepts optional POST body: {"days_back": N} — only scans meetings from last N days (default: 1).
+    Uses a time budget to avoid Vercel Hobby 60s timeout — returns partial results if exceeded."""
+    import time
+    TIME_BUDGET = 50  # seconds — stay under Vercel Hobby 60s hard limit
+
     days_back = 1
     try:
         body = json.loads(request.body) if request.body else {}
@@ -459,8 +463,15 @@ def backlog_scan(request):
 
     all_enhancements = []
     processed_meetings = 0
+    timed_out = False
+    start_time = time.time()
 
     for meeting in meetings:
+        # Check time budget before each meeting
+        if time.time() - start_time >= TIME_BUDGET:
+            timed_out = True
+            break
+
         meeting_ref = f'Meeting: {meeting.title} (ID: {meeting.id})'
         if meeting_ref in existing_sources:
             continue
@@ -550,6 +561,8 @@ def backlog_scan(request):
         'total_found': len(all_enhancements),
         'processed_meetings': processed_meetings,
         'created_count': created_count,
+        'timed_out': timed_out,
+        'remaining_meetings': meetings.count() - processed_meetings if timed_out else 0,
     })
 
 
