@@ -6,7 +6,7 @@ from django.conf import settings
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-MAX_INPUT_CHARS = 50000
+MAX_INPUT_CHARS = 15000
 
 def generate_tasks_from_summary(transcript_text, meeting_title):
     api_key = settings.OPENROUTER_API_KEY
@@ -45,7 +45,7 @@ Transcript:
 {transcript_text}"""
 
     import time
-    MAX_ATTEMPTS = 5
+    MAX_ATTEMPTS = 3
     for attempt in range(MAX_ATTEMPTS):
         try:
             resp = requests.post(
@@ -59,9 +59,9 @@ Transcript:
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.4,
-                    "max_tokens": 8192,
+                    "max_tokens": 4096,
                 },
-                timeout=30,
+                timeout=15,
             )
             if resp.status_code != 200:
                 print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS} failed: {resp.status_code} {resp.text[:500]}", file=sys.stderr)
@@ -130,7 +130,7 @@ Transcript:
 {transcript_text}"""
 
     import time
-    MAX_ATTEMPTS = 3
+    MAX_ATTEMPTS = 2
     for attempt in range(MAX_ATTEMPTS):
         try:
             resp = requests.post(
@@ -144,9 +144,9 @@ Transcript:
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.3,
-                    "max_tokens": 4096,
+                    "max_tokens": 2048,
                 },
-                timeout=30,
+                timeout=15,
             )
             if resp.status_code != 200:
                 print(f"enrich_fathom attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
@@ -218,7 +218,7 @@ Meeting Content:
 """
 
     import time
-    MAX_ATTEMPTS = 3
+    MAX_ATTEMPTS = 2
     for attempt in range(MAX_ATTEMPTS):
         try:
             resp = requests.post(
@@ -232,9 +232,9 @@ Meeting Content:
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.3,
-                    "max_tokens": 4096,
+                    "max_tokens": 2048,
                 },
-                timeout=30,
+                timeout=15,
             )
             if resp.status_code != 200:
                 print(f"analyze_meeting_for_enhancements attempt {attempt+1} failed: {resp.status_code} {resp.text[:300]}", file=sys.stderr)

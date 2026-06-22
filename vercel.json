@@ -6,6 +6,11 @@
       "config": { "maxLambdaSize": "15mb", "runtime": "python3.12" }
     }
   ],
+  "functions": {
+    "backend/wsgi.py": {
+      "maxDuration": 300
+    }
+  },
   "routes": [
     {
       "src": "/(.*)",
