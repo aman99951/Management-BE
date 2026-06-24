@@ -14,6 +14,8 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import json
 import os
+import sys
+import traceback
 from datetime import datetime, timedelta
 from django.db.models import Count, Q
 from django.db.models.functions import TruncDay
@@ -436,138 +438,164 @@ def backlog_scan(request):
     """AI-powered scan: analyze full meeting conversations to extract structured product enhancement ideas.
     Accepts optional POST body: {"days_back": N} — only scans meetings from last N days (default: 1).
     Uses a time budget to avoid Vercel Hobby 60s timeout — returns partial results if exceeded."""
+    import traceback
     import time
     TIME_BUDGET = 50  # seconds — stay under Vercel Hobby 60s hard limit
 
-    days_back = 1
     try:
-        body = json.loads(request.body) if request.body else {}
-        days_back = int(body.get('days_back', 1))
-    except (json.JSONDecodeError, ValueError, TypeError):
         days_back = 1
-    days_back = max(days_back, 0)
+        try:
+            body = json.loads(request.body) if request.body else {}
+            days_back = int(body.get('days_back', 1))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            days_back = 1
+        days_back = max(days_back, 0)
 
-    from .ai_service import analyze_meeting_for_enhancements
+        from .ai_service import analyze_meeting_for_enhancements
 
-    since_date = timezone.now() - timedelta(days=days_back) if days_back > 0 else None
+        since_date = timezone.now() - timedelta(days=days_back) if days_back > 0 else None
 
-    # Collect meetings with transcripts or summaries
-    meetings = Meeting.objects.exclude(
-        Q(transcript__isnull=True) & Q(summary__exact='')
-    )
-    if since_date:
-        meetings = meetings.filter(created_at__gte=since_date)
-
-    # Load existing source_refs to avoid duplicate creation
-    existing_sources = set(BacklogItem.objects.filter(source='auto-capture').values_list('source_ref', flat=True))
-
-    all_enhancements = []
-    processed_meetings = 0
-    timed_out = False
-    start_time = time.time()
-
-    for meeting in meetings:
-        # Check time budget before each meeting
-        if time.time() - start_time >= TIME_BUDGET:
-            timed_out = True
-            break
-
-        meeting_ref = f'Meeting: {meeting.title} (ID: {meeting.id})'
-        if meeting_ref in existing_sources:
-            continue
-
-        # Build full meeting content
-        meeting_text_parts = []
-        if meeting.summary:
-            meeting_text_parts.append(f"--- AI Summary ---\n{meeting.summary}")
-        if meeting.transcript:
-            if isinstance(meeting.transcript, str):
-                meeting_text_parts.append(f"--- Transcript ---\n{meeting.transcript}")
-            elif isinstance(meeting.transcript, list):
-                transcript_lines = []
-                for chunk in meeting.transcript:
-                    speaker = chunk.get('speaker', {})
-                    speaker_name = speaker.get('display_name', 'Unknown') if isinstance(speaker, dict) else 'Unknown'
-                    text = chunk.get('text', '') or chunk.get('content', '')
-                    if text:
-                        transcript_lines.append(f"{speaker_name}: {text}")
-                if transcript_lines:
-                    meeting_text_parts.append(f"--- Transcript ---\n" + '\n'.join(transcript_lines))
-
-        meeting_text = '\n\n'.join(meeting_text_parts)
-        if not meeting_text:
-            continue
-
-        # Send to AI for comprehensive analysis
-        enhancements = analyze_meeting_for_enhancements(meeting_text, meeting.title)
-        processed_meetings += 1
-
-        for item in enhancements:
-            item['meeting_id'] = meeting.id
-            item['meeting_title'] = meeting.title
-            item['meeting_date'] = meeting.recorded_at
-            item['source_ref'] = meeting_ref
-            all_enhancements.append(item)
-
-    # Create BacklogItems for each enhancement
-    created_count = 0
-    created_items = []
-    for item in all_enhancements:
-        # Build a comprehensive description from the structured fields
-        description_parts = []
-        if item.get('background'):
-            description_parts.append(f"Background / Problem Statement:\n{item['background']}")
-        if item.get('proposed_enhancement'):
-            description_parts.append(f"Proposed Enhancement:\n{item['proposed_enhancement']}")
-        if item.get('expected_benefits'):
-            description_parts.append(f"Expected Benefits / Business Impact:\n{item['expected_benefits']}")
-        if item.get('stakeholders'):
-            description_parts.append(f"Stakeholders Affected: {item['stakeholders']}")
-        if item.get('source_of_idea'):
-            description_parts.append(f"Source of Idea: {item['source_of_idea']}")
-
-        description = '\n\n---\n\n'.join(description_parts)
-
-        # Map priority
-        priority = item.get('priority', 'Medium')
-        if priority not in dict(BacklogItem.PRIORITY_CHOICES):
-            priority = 'Medium'
-
-        backlog_item = BacklogItem.objects.create(
-            description=description,
-            priority=priority,
-            status='Future Consideration',
-            source='auto-capture',
-            source_ref=item.get('source_ref', ''),
-            meeting_date=item.get('meeting_date'),
+        # Collect meetings with transcripts or summaries
+        meetings = Meeting.objects.exclude(
+            Q(transcript__isnull=True) & Q(summary__exact='')
         )
-        created_count += 1
+        if since_date:
+            meetings = meetings.filter(created_at__gte=since_date)
 
-        # Return structured data to frontend
-        md = item.get('meeting_date')
-        created_items.append({
-            'id': backlog_item.id,
-            'title': item.get('title', ''),
-            'background': item.get('background', ''),
-            'proposed_enhancement': item.get('proposed_enhancement', ''),
-            'expected_benefits': item.get('expected_benefits', ''),
-            'stakeholders': item.get('stakeholders', ''),
-            'priority': priority,
-            'source_of_idea': item.get('source_of_idea', ''),
-            'source': f'Meeting: {item.get("meeting_title", "")}',
-            'meeting_title': item.get('meeting_title', ''),
-            'meeting_date': md.isoformat() if md else None,
-            'created_at': backlog_item.created_at.isoformat(),
+        # Load existing source_refs to avoid duplicate creation
+        existing_sources = set(BacklogItem.objects.filter(source='auto-capture').values_list('source_ref', flat=True))
+
+        all_enhancements = []
+        processed_meetings = 0
+        timed_out = False
+        start_time = time.time()
+
+        for meeting in meetings:
+            # Check time budget before each meeting
+            if time.time() - start_time >= TIME_BUDGET:
+                timed_out = True
+                break
+
+            meeting_ref = f'Meeting: {meeting.title} (ID: {meeting.id})'
+            if meeting_ref in existing_sources:
+                continue
+
+            # Build full meeting content with defensive parsing
+            meeting_text_parts = []
+            if meeting.summary:
+                meeting_text_parts.append(f"--- AI Summary ---\n{meeting.summary}")
+            if meeting.transcript:
+                if isinstance(meeting.transcript, str):
+                    meeting_text_parts.append(f"--- Transcript ---\n{meeting.transcript}")
+                elif isinstance(meeting.transcript, list):
+                    transcript_lines = []
+                    for chunk in meeting.transcript:
+                        # Defensive: chunk may be a non-dict (e.g. string) — handle gracefully
+                        if isinstance(chunk, dict):
+                            speaker = chunk.get('speaker', {})
+                            speaker_name = speaker.get('display_name', 'Unknown') if isinstance(speaker, dict) else 'Unknown'
+                            text = chunk.get('text', '') or chunk.get('content', '')
+                        elif isinstance(chunk, str):
+                            speaker_name = 'Unknown'
+                            text = chunk
+                        else:
+                            continue
+                        if text:
+                            transcript_lines.append(f"{speaker_name}: {text}")
+                    if transcript_lines:
+                        meeting_text_parts.append(f"--- Transcript ---\n" + '\n'.join(transcript_lines))
+
+            meeting_text = '\n\n'.join(meeting_text_parts)
+            if not meeting_text:
+                continue
+
+            # Send to AI for comprehensive analysis
+            try:
+                enhancements = analyze_meeting_for_enhancements(meeting_text, meeting.title)
+            except Exception as e:
+                print(f"backlog_scan: AI analysis failed for meeting {meeting.id}: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                continue
+            processed_meetings += 1
+
+            for item in enhancements:
+                item['meeting_id'] = meeting.id
+                item['meeting_title'] = meeting.title
+                item['meeting_date'] = meeting.recorded_at
+                item['source_ref'] = meeting_ref
+                all_enhancements.append(item)
+
+        # Create BacklogItems for each enhancement
+        created_count = 0
+        created_items = []
+        for item in all_enhancements:
+            # Build a comprehensive description from the structured fields
+            description_parts = []
+            if item.get('background'):
+                description_parts.append(f"Background / Problem Statement:\n{item['background']}")
+            if item.get('proposed_enhancement'):
+                description_parts.append(f"Proposed Enhancement:\n{item['proposed_enhancement']}")
+            if item.get('expected_benefits'):
+                description_parts.append(f"Expected Benefits / Business Impact:\n{item['expected_benefits']}")
+            if item.get('stakeholders'):
+                description_parts.append(f"Stakeholders Affected: {item['stakeholders']}")
+            if item.get('source_of_idea'):
+                description_parts.append(f"Source of Idea: {item['source_of_idea']}")
+
+            description = '\n\n---\n\n'.join(description_parts)
+
+            # Map priority
+            priority = item.get('priority', 'Medium')
+            if priority not in dict(BacklogItem.PRIORITY_CHOICES):
+                priority = 'Medium'
+
+            try:
+                backlog_item = BacklogItem.objects.create(
+                    description=description,
+                    priority=priority,
+                    status='Future Consideration',
+                    source='auto-capture',
+                    source_ref=item.get('source_ref', ''),
+                    meeting_date=item.get('meeting_date'),
+                )
+            except Exception as e:
+                print(f"backlog_scan: failed to create BacklogItem: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                continue
+            created_count += 1
+
+            # Return structured data to frontend
+            md = item.get('meeting_date')
+            created_items.append({
+                'id': backlog_item.id,
+                'title': item.get('title', ''),
+                'background': item.get('background', ''),
+                'proposed_enhancement': item.get('proposed_enhancement', ''),
+                'expected_benefits': item.get('expected_benefits', ''),
+                'stakeholders': item.get('stakeholders', ''),
+                'priority': priority,
+                'source_of_idea': item.get('source_of_idea', ''),
+                'source': f'Meeting: {item.get("meeting_title", "")}',
+                'meeting_title': item.get('meeting_title', ''),
+                'meeting_date': md.isoformat() if md else None,
+                'created_at': backlog_item.created_at.isoformat(),
+            })
+
+        return Response({
+            'items': created_items,
+            'total_found': len(all_enhancements),
+            'processed_meetings': processed_meetings,
+            'created_count': created_count,
+            'timed_out': timed_out,
+            'remaining_meetings': meetings.count() - processed_meetings if timed_out else 0,
         })
-
-    return Response({
-        'items': created_items,
-        'total_found': len(all_enhancements),
-        'processed_meetings': processed_meetings,
-        'created_count': created_count,
-        'timed_out': timed_out,
-        'remaining_meetings': meetings.count() - processed_meetings if timed_out else 0,
-    })
+    except Exception as e:
+        print(f"backlog_scan: unexpected error: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return Response({
+            'error': 'Internal server error during backlog scan',
+            'detail': str(e),
+        }, status=500)
 
 
 @api_view(['GET', 'POST'])
