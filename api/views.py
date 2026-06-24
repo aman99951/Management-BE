@@ -786,21 +786,31 @@ def _auto_generate_tasks_for_meeting(meeting):
 @csrf_exempt
 @require_POST
 def fathom_sync_view(request):
-    new_meetings, count = sync_meetings()
-    # Auto-generate tasks for newly synced meetings
-    auto_generated = 0
-    all_email_details = []
-    for meeting in new_meetings:
-        result = _auto_generate_tasks_for_meeting(meeting)
-        auto_generated += result['task_count']
-        if result['email_status']['details']:
-            all_email_details.extend(result['email_status']['details'])
-    return JsonResponse({
-        'synced': count,
-        'auto_generated_tasks': auto_generated,
-        'emails_sent': sum(1 for d in all_email_details if d['sent']),
-        'emails_failed': sum(1 for d in all_email_details if not d['sent']),
-    })
+    try:
+        new_meetings, count = sync_meetings()
+        # Auto-generate tasks for newly synced meetings
+        auto_generated = 0
+        all_email_details = []
+        for meeting in new_meetings:
+            try:
+                result = _auto_generate_tasks_for_meeting(meeting)
+                auto_generated += result['task_count']
+                if result['email_status']['details']:
+                    all_email_details.extend(result['email_status']['details'])
+            except Exception as e:
+                print(f"fathom_sync: task generation failed for meeting {meeting.id}: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                continue
+        return JsonResponse({
+            'synced': count,
+            'auto_generated_tasks': auto_generated,
+            'emails_sent': sum(1 for d in all_email_details if d['sent']),
+            'emails_failed': sum(1 for d in all_email_details if not d['sent']),
+        })
+    except Exception as e:
+        print(f"fathom_sync: unexpected error: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return JsonResponse({'error': 'Sync failed', 'detail': str(e)}, status=500)
 
 @api_view(['POST'])
 def fathom_webhook_view(request):
