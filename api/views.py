@@ -121,15 +121,20 @@ def _create_tasks_from_fathom_action_items(meeting):
     return created
 
 
-def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date, existing_descriptions=None):
+def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date, existing_descriptions=None, existing_titles_by_assignee=None):
     """Shared logic to create Task objects from AI response list.
     Handles title fallback, employee matching, and deduplication.
     existing_descriptions: optional set of normalized descriptions to skip (for Fathom/AI dedup).
+    existing_titles_by_assignee: optional dict of {employee_id_or_None: set(title_prefixes)} to
+      dedup by (assignee, title_prefix) pairs (catches within-AI and cross-source duplicates).
     Also checks DB for existing tasks with same (meeting, title, assigned_to) to prevent
     cross-source duplicates regardless of description wording differences.
     """
     created_tasks = []
     seen_descriptions = set(existing_descriptions or [])
+    seen_title_assignee = {}
+    if existing_titles_by_assignee:
+        seen_title_assignee = {k: set(v) for k, v in existing_titles_by_assignee.items()}
 
     for t in ai_tasks:
         desc = t.get('description', '')
@@ -151,6 +156,14 @@ def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date, existing_descrip
 
         if Task.objects.filter(meeting=meeting, title__iexact=title, assigned_to=employee).exists():
             continue
+
+        # Dedup by (title_prefix, assignee): skip if same assignee + similar title already captured
+        title_prefix = title.lower().strip()[:40]
+        emp_key = employee.id if employee else None
+        if emp_key in seen_title_assignee:
+            if title_prefix in seen_title_assignee[emp_key]:
+                continue
+        seen_title_assignee.setdefault(emp_key, set()).add(title_prefix)
 
         priority = t.get('priority', 'medium')
         if priority not in dict(Task.PRIORITY_CHOICES):
@@ -758,19 +771,31 @@ def _auto_generate_tasks_for_meeting(meeting):
                 elif meeting.summary:
                     input_text += f"Summary:\n{meeting.summary}\n"
 
+                # Append already-captured tasks so AI knows not to re-create them
+                if fathom_created:
+                    input_text += "\n\nNOTE - The following tasks were ALREADY CAPTURED from this meeting. DO NOT create duplicates of them:\n"
+                    for t in fathom_created:
+                        aname = t.assigned_to.name if t.assigned_to else 'Unassigned'
+                        input_text += f"- {t.title} (assignee: {aname})\n"
+
                 if settings.OPENROUTER_API_KEY:
                     from .ai_service import generate_tasks_from_summary
                     ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
                     if ai_tasks and isinstance(ai_tasks, list):
                         meeting_date = meeting.recorded_at or meeting.created_at
                         existing_descriptions = None
+                        existing_titles_by_assignee = None
                         if fathom_created:
                             existing_descriptions = set()
+                            existing_titles_by_assignee = {}
                             for t in fathom_created:
                                 existing_descriptions.add(t.description.lower().strip()[:80])
+                                emp_key = t.assigned_to.id if t.assigned_to else None
+                                existing_titles_by_assignee.setdefault(emp_key, set()).add(t.title.lower().strip()[:40])
                         ai_created = _create_tasks_from_ai_list(
                             ai_tasks, meeting, meeting_date,
                             existing_descriptions=existing_descriptions,
+                            existing_titles_by_assignee=existing_titles_by_assignee,
                         )
                         if ai_created:
                             total_count += len(ai_created)

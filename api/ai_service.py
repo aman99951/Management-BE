@@ -20,24 +20,27 @@ def generate_tasks_from_summary(transcript_text, meeting_title):
     if len(transcript_text) > MAX_INPUT_CHARS:
         transcript_text = transcript_text[:MAX_INPUT_CHARS] + "\n\n[Note: transcript truncated due to length]"
 
-    prompt = f"""You are a precise task extraction assistant. Your job is to extract ONLY explicit action items where someone is clearly assigned to do something in the future.
+    prompt = f"""You are a precise and THOROUGH task extraction assistant. Extract EVERY explicit action item where someone is assigned to do something in the future — do not miss any assignee.
 
 For each task provide:
 - title: concise title (max 100 chars) — GENERATE THIS FROM the description, DO NOT leave it blank or "Untitled"
 - description: detailed summary of what exactly needs to be done — include ALL specific requirements, features, deadlines, integrations, or action points the assigner (Sekar, Mani Gajendran, or anyone) mentioned. Write in clear English, but capture every concrete detail from the discussion. Do NOT be generic; be as specific as the transcript is.
-- assignee: the person responsible — use their FULL name EXACTLY as it appears in the transcript speaker labels (e.g., "Sekar D", "karan kumar", "Avinesh Duraimanickam", "Praveen G")
+- assignee: the person responsible — use their FULL name EXACTLY as it appears in the transcript speaker labels (e.g., "Sekar", "Aman Kumar", "karan kumar", "Avinesh Duraimanickam", "Praveen G")
 - priority: "low", "medium", "high", or "critical"
 
 CRITICAL RULES — FOLLOW THESE WITHOUT EXCEPTION:
 1. ONLY create a task when someone is EXPLICITLY told or agrees to do something in the FUTURE. IGNORE past-tense progress updates (e.g., "yesterday I worked on X" is NOT a task).
 2. The assignee MUST be the person who WILL DO the work, not the person who assigned it.
 3. If someone says "I'll do X" or "I will X", that is a task for that person.
-4. If a manager tells someone "please do X", the assignee is the person told to do it.
+4. If a manager tells someone "please do X" or tells the group "X will handle this", the assignee is the person told to do it (or named as the doer).
 5. Sekar and Mani Gajendran are the managers/owners who delegate work. When they say "Praveen, do X" or "Karan, please handle Y", assignee is Praveen/Karan, NOT Sekar/Mani. Only assign a task to Sekar or Mani if they explicitly say "I will do it myself".
 6. Do NOT create tasks from general discussion, brainstorming, or problem descriptions without a clear "who will do what".
-7. Use the speaker name EXACTLY as shown in the transcript (e.g., "Sekar D", "karan kumar", "Avinesh Duraimanickam").
+7. Use the speaker name EXACTLY as shown in the transcript (e.g., "Sekar", "Aman Kumar", "karan kumar", "Avinesh Duraimanickam", "Praveen G"). DO NOT modify or add extra words to names.
 8. NEVER use null for assignee — if no one is clearly assigned, omit that item entirely.
 9. Return ONLY a valid JSON array of task objects — no commentary, no markdown.
+10. Be THOROUGH — scan the ENTIRE transcript and capture EVERY person who is assigned work, including Sekar, Aman, Karan, Praveen, Avinesh, and anyone else. Do not skip anyone.
+
+If a NOTE section lists already-captured tasks, DO NOT create duplicates of them.
 
 Meeting: {meeting_title}
 
@@ -58,10 +61,10 @@ Transcript:
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.4,
-                    "max_tokens": 4096,
+                    "temperature": 0.1,
+                    "max_tokens": 8192,
                 },
-                timeout=15,
+                timeout=30,
             )
             if resp.status_code != 200:
                 print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS} failed: {resp.status_code} {resp.text[:500]}", file=sys.stderr)
