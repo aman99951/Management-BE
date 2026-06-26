@@ -736,10 +736,11 @@ def _auto_generate_tasks_for_meeting(meeting):
     if fathom_created and meeting.transcript and settings.OPENROUTER_API_KEY:
         _enrich_fathom_tasks(meeting, fathom_created)
 
-    # Phase 2: ONLY run AI generation if Fathom had no raw_action_items
-    # (fallback for meetings without Fathom action item capture)
+    # Phase 2: Run AI extraction from transcript to catch tasks Fathom may have missed.
+    # Even when Fathom raw_action_items exist, it may have captured only partial tasks.
+    # AI finds additional tasks from the transcript, deduplicated against Fathom tasks.
     ai_created = []
-    if not meeting.raw_action_items and not Task.objects.filter(meeting=meeting, source='ai').exists():
+    if not Task.objects.filter(meeting=meeting, source='ai').exists():
         if not meeting.transcript and not meeting.summary:
             pass  # No transcript/summary to run AI on
         else:
@@ -762,8 +763,14 @@ def _auto_generate_tasks_for_meeting(meeting):
                     ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
                     if ai_tasks and isinstance(ai_tasks, list):
                         meeting_date = meeting.recorded_at or meeting.created_at
+                        existing_descriptions = None
+                        if fathom_created:
+                            existing_descriptions = set()
+                            for t in fathom_created:
+                                existing_descriptions.add(t.description.lower().strip()[:80])
                         ai_created = _create_tasks_from_ai_list(
                             ai_tasks, meeting, meeting_date,
+                            existing_descriptions=existing_descriptions,
                         )
                         if ai_created:
                             total_count += len(ai_created)
