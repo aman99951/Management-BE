@@ -42,7 +42,11 @@ Be THOROUGH — scan the ENTIRE transcript. Extract tasks for EVERY employee who
 
 Use the speaker name EXACTLY as it appears — do NOT modify names.
 
-If someone's statement is ambiguous about who does the work, omit that item. Return ONLY a valid JSON array — no commentary.
+If someone's statement is ambiguous about who does the work, omit that item.
+
+MERGE similar tasks: If the same person is assigned multiple closely related action items about the same topic (e.g., "Redesign UI" + "Update UI layout"), combine them into ONE task with a comprehensive description. Do NOT split the same work into multiple entries.
+
+Return ONLY a valid JSON array — no commentary.
 
 If a NOTE section lists already-captured tasks, DO NOT create duplicates of them.
 

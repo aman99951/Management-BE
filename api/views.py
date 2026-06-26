@@ -124,17 +124,15 @@ def _create_tasks_from_fathom_action_items(meeting):
 def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date, existing_descriptions=None, existing_titles_by_assignee=None):
     """Shared logic to create Task objects from AI response list.
     Handles title fallback, employee matching, and deduplication.
-    existing_descriptions: optional set of normalized descriptions to skip (for Fathom/AI dedup).
-    existing_titles_by_assignee: optional dict of {employee_id_or_None: set(title_prefixes)} to
-      dedup by (assignee, title_prefix) pairs (catches within-AI and cross-source duplicates).
-    Also checks DB for existing tasks with same (meeting, title, assigned_to) to prevent
-    cross-source duplicates regardless of description wording differences.
     """
     created_tasks = []
     seen_descriptions = set(existing_descriptions or [])
-    seen_title_assignee = {}
+    seen_title_prefix_global = set()
+    seen_title_words_by_assignee = {}
+
     if existing_titles_by_assignee:
-        seen_title_assignee = {k: set(v) for k, v in existing_titles_by_assignee.items()}
+        for ek, prefixes in existing_titles_by_assignee.items():
+            seen_title_prefix_global.update(prefixes)
 
     for t in ai_tasks:
         desc = t.get('description', '')
@@ -157,13 +155,29 @@ def _create_tasks_from_ai_list(ai_tasks, meeting, meeting_date, existing_descrip
         if Task.objects.filter(meeting=meeting, title__iexact=title, assigned_to=employee).exists():
             continue
 
-        # Dedup by (title_prefix, assignee): skip if same assignee + similar title already captured
-        title_prefix = title.lower().strip()[:40]
+        title_lower = title.lower().strip()
+        title_prefix = title_lower[:40]
+
+        # Global dedup: same title prefix seen already (regardless of assignee)
+        if title_prefix in seen_title_prefix_global:
+            continue
+        seen_title_prefix_global.add(title_prefix)
+
+        # Word-overlap dedup: same assignee + >50% significant word overlap = duplicate
         emp_key = employee.id if employee else None
-        if emp_key in seen_title_assignee:
-            if title_prefix in seen_title_assignee[emp_key]:
-                continue
-        seen_title_assignee.setdefault(emp_key, set()).add(title_prefix)
+        if emp_key is not None:
+            words = {w for w in title_lower.split() if len(w) > 3}
+            if words and emp_key in seen_title_words_by_assignee:
+                is_dup = False
+                for existing_words in seen_title_words_by_assignee[emp_key]:
+                    overlap = len(words & existing_words)
+                    smaller = min(len(words), len(existing_words))
+                    if smaller > 0 and overlap / smaller >= 0.5:
+                        is_dup = True
+                        break
+                if is_dup:
+                    continue
+            seen_title_words_by_assignee.setdefault(emp_key, []).append(words)
 
         priority = t.get('priority', 'medium')
         if priority not in dict(Task.PRIORITY_CHOICES):
