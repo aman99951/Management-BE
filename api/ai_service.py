@@ -20,25 +20,29 @@ def generate_tasks_from_summary(transcript_text, meeting_title):
     if len(transcript_text) > MAX_INPUT_CHARS:
         transcript_text = transcript_text[:MAX_INPUT_CHARS] + "\n\n[Note: transcript truncated due to length]"
 
-    prompt = f"""You are a precise and THOROUGH task extraction assistant. Extract EVERY explicit action item where someone is assigned to do something in the future — do not miss any assignee.
+    prompt = f"""You are a precise and THOROUGH task extraction assistant. Extract EVERY action item where someone is expected to do something in the future — do not miss any person.
 
 For each task provide:
 - title: concise title (max 100 chars) — GENERATE THIS FROM the description, DO NOT leave it blank or "Untitled"
-- description: detailed summary of what exactly needs to be done — include ALL specific requirements, features, deadlines, integrations, or action points the assigner (Sekar, Mani Gajendran, or anyone) mentioned. Write in clear English, but capture every concrete detail from the discussion. Do NOT be generic; be as specific as the transcript is.
-- assignee: the person responsible — use their FULL name EXACTLY as it appears in the transcript speaker labels (e.g., "Sekar", "Aman Kumar", "karan kumar", "Avinesh Duraimanickam", "Praveen G")
+- description: detailed summary of what exactly needs to be done — include ALL specific requirements, features, deadlines, integrations, or action points mentioned. Write in clear English, but capture every concrete detail from the discussion.
+- assignee: the person responsible — use their FULL name EXACTLY as it appears in the transcript speaker labels (e.g., "Sekar", "Aman Kumar", "karan kumar", "Avinesh Duraimanickam", "Praveen GM")
 - priority: "low", "medium", "high", or "critical"
 
-CRITICAL RULES — FOLLOW THESE WITHOUT EXCEPTION:
-1. ONLY create a task when someone is EXPLICITLY told or agrees to do something in the FUTURE. IGNORE past-tense progress updates (e.g., "yesterday I worked on X" is NOT a task).
-2. The assignee MUST be the person who WILL DO the work, not the person who assigned it.
-3. If someone says "I'll do X" or "I will X", that is a task for that person.
-4. If a manager tells someone "please do X" or tells the group "X will handle this", the assignee is the person told to do it (or named as the doer).
-5. Sekar and Mani Gajendran are the managers/owners who delegate work. When they say "Praveen, do X" or "Karan, please handle Y", assignee is Praveen/Karan, NOT Sekar/Mani. Only assign a task to Sekar or Mani if they explicitly say "I will do it myself".
-6. Do NOT create tasks from general discussion, brainstorming, or problem descriptions without a clear "who will do what".
-7. Use the speaker name EXACTLY as shown in the transcript (e.g., "Sekar", "Aman Kumar", "karan kumar", "Avinesh Duraimanickam", "Praveen G"). DO NOT modify or add extra words to names.
-8. NEVER use null for assignee — if no one is clearly assigned, omit that item entirely.
-9. Return ONLY a valid JSON array of task objects — no commentary, no markdown.
-10. Be THOROUGH — scan the ENTIRE transcript and capture EVERY person who is assigned work, including Sekar, Aman, Karan, Praveen, Avinesh, and anyone else. Do not skip anyone.
+DEFINITION OF A TASK (create a task for EACH of these patterns):
+1. "I will X" / "I'll X" / "I need to X" / "I have to X" / "I'm going to X" = task for that speaker.
+2. "Please do X" / "Can you X?" / "Could you X?" / "X, please handle Y" directed at someone = task for the person addressed.
+3. "He'll do X" / "She'll handle X" / "X will take care of Y" / "X will work on Y" spoken about someone = task for X.
+4. "I've shared X with Y, Y will do it" / "Y needs to X" / "Y is working on X" = task for Y.
+5. "We need to X" with a specific person named as responsible = task for that person.
+6. Ongoing work mentioned in context of continuing today/tomorrow/this week = task (e.g., "I'm continuing X today").
+
+IGNORE only pure past-tense updates with no future intent (e.g., "yesterday I did X" with no follow-up).
+
+Be THOROUGH — scan the ENTIRE transcript. Extract tasks for EVERY employee who is assigned work. Include Sekar, Aman, Karan, Praveen, Avinesh, and anyone else.
+
+Use the speaker name EXACTLY as it appears — do NOT modify names.
+
+If someone's statement is ambiguous about who does the work, omit that item. Return ONLY a valid JSON array — no commentary.
 
 If a NOTE section lists already-captured tasks, DO NOT create duplicates of them.
 
@@ -61,7 +65,7 @@ Transcript:
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
+                    "temperature": 0.2,
                     "max_tokens": 8192,
                 },
                 timeout=30,
