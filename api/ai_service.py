@@ -29,12 +29,15 @@ For each task provide:
 - priority: "low", "medium", "high", or "critical"
 
 DEFINITION OF A TASK (create a task for EACH of these patterns):
-1. "I will X" / "I'll X" / "I need to X" / "I have to X" / "I'm going to X" = task for that speaker.
+1. "I will X" / "I'll X" / "I need to X" / "I have to X" / "I'm going to X" / "I'll call X" / "I'll check X" = task for that speaker.
 2. "Please do X" / "Can you X?" / "Could you X?" / "X, please handle Y" directed at someone = task for the person addressed.
-3. "He'll do X" / "She'll handle X" / "X will take care of Y" / "X will work on Y" spoken about someone = task for X.
-4. "I've shared X with Y, Y will do it" / "Y needs to X" / "Y is working on X" = task for Y.
-5. "We need to X" with a specific person named as responsible = task for that person.
-6. Ongoing work mentioned in context of continuing today/tomorrow/this week = task (e.g., "I'm continuing X today").
+3. "He'll do X" / "She'll handle X" / "X will take care of Y" / "X will work on Y" / "X will fix it" spoken about someone = task for X.
+4. TASK TRANSFERS: When someone says "I shared X with Y, Y will do it" or "I sent X to Y, Y will handle it" or "I've given X to Y, he'll work on it" — the task belongs to Y, NOT the speaker. The receiver (Y) is the assignee.
+5. "Let me check" / "Let me look into it" / "Let me investigate" / "I'll check and come back" = task for the SPEAKER who says this, not the person they are talking to.
+6. "We need to X" with a specific person named as responsible = task for that person.
+7. Ongoing work mentioned in context of continuing today/tomorrow/this week = task (e.g., "I'm continuing X today").
+8. TIME-BOUND COMMITMENTS: When person A asks "Will you be ready by X?" and person B answers "Yes" or "By X date" — task for person B.
+9. FOLLOW-UP CALLS: "I'll call customers/providers/them" / "I'll follow up with X" = task for the speaker who says they will call.
 
 IGNORE only pure past-tense updates with no future intent (e.g., "yesterday I did X" with no follow-up).
 
@@ -42,9 +45,9 @@ Be THOROUGH — scan the ENTIRE transcript. Extract tasks for EVERY employee who
 
 Use the speaker name EXACTLY as it appears — do NOT modify names.
 
-If someone's statement is ambiguous about who does the work, omit that item.
+CRITICAL: Create a SEPARATE task entry for EACH distinct action item. Do NOT merge or combine different action items into one task — even if they belong to the same person. Each action item gets its own task with its own title and description.
 
-MERGE similar tasks: If the same person is assigned multiple closely related action items about the same topic (e.g., "Redesign UI" + "Update UI layout"), combine them into ONE task with a comprehensive description. Do NOT split the same work into multiple entries.
+If someone's statement is ambiguous about who does the work, omit that item.
 
 Return ONLY a valid JSON array — no commentary.
 

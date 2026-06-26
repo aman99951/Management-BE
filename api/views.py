@@ -266,13 +266,14 @@ class MeetingViewSet(viewsets.ModelViewSet):
         fathom_tasks = []
         ai_created_tasks = []
 
+        # Phase 1: Create tasks directly from Fathom raw_action_items (authoritative)
         if meeting.raw_action_items:
-            # Phase 1: Create tasks directly from Fathom raw_action_items (authoritative)
             fathom_tasks = _create_tasks_from_fathom_action_items(meeting)
-            # Enrich their descriptions with AI from transcript instead of creating separate AI tasks
             _enrich_fathom_tasks(meeting, fathom_tasks)
-        elif meeting.transcript and settings.OPENROUTER_API_KEY:
-            # Fallback: No Fathom items, use AI to generate tasks from transcript
+
+        # Phase 2: AI extraction to catch tasks Fathom may have missed.
+        # Runs even when Fathom items exist (for partial capture), deduplicated against Fathom tasks.
+        if meeting.transcript and settings.OPENROUTER_API_KEY:
             transcript_text = ''
             for entry in meeting.transcript:
                 speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
@@ -281,12 +282,31 @@ class MeetingViewSet(viewsets.ModelViewSet):
 
             if transcript_text:
                 input_text = f"Meeting Title: {meeting.title}\n\nTranscript:\n{transcript_text}\n"
+
+                # Append already-captured Fathom tasks so AI knows not to re-create them
+                if fathom_tasks:
+                    input_text += "\n\nNOTE - The following tasks were ALREADY CAPTURED from this meeting. DO NOT create duplicates of them:\n"
+                    for t in fathom_tasks:
+                        aname = t.assigned_to.name if t.assigned_to else 'Unassigned'
+                        input_text += f"- {t.title} (assignee: {aname})\n"
+
                 from .ai_service import generate_tasks_from_summary
                 ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
                 if ai_tasks and isinstance(ai_tasks, list):
                     meeting_date = meeting.recorded_at or meeting.created_at
+                    existing_descriptions = None
+                    existing_titles_by_assignee = None
+                    if fathom_tasks:
+                        existing_descriptions = set()
+                        existing_titles_by_assignee = {}
+                        for t in fathom_tasks:
+                            existing_descriptions.add(t.description.lower().strip()[:80])
+                            emp_key = t.assigned_to.id if t.assigned_to else None
+                            existing_titles_by_assignee.setdefault(emp_key, set()).add(t.title.lower().strip()[:40])
                     ai_created_tasks = _create_tasks_from_ai_list(
                         ai_tasks, meeting, meeting_date,
+                        existing_descriptions=existing_descriptions,
+                        existing_titles_by_assignee=existing_titles_by_assignee,
                     )
 
         all_created = fathom_tasks + ai_created_tasks
