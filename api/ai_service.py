@@ -6,7 +6,7 @@ from django.conf import settings
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-MAX_INPUT_CHARS = 15000
+MAX_INPUT_CHARS = 30000
 
 def generate_tasks_from_summary(transcript_text, meeting_title):
     api_key = settings.OPENROUTER_API_KEY
