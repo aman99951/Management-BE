@@ -1,4 +1,5 @@
 from rest_framework import viewsets, status
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import api_view, action, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -397,9 +398,55 @@ class TaskViewSet(viewsets.ModelViewSet):
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
 
+class BacklogPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 500
+
+    def get_paginated_response(self, data):
+        return Response({
+            'count': self.page.paginator.count,
+            'next': self.get_next_link(),
+            'previous': self.get_previous_link(),
+            'results': data,
+            'pending_count': BacklogItem.objects.filter(created_task__isnull=True).exclude(status='Done').count(),
+            'converted_count': BacklogItem.objects.filter(created_task__isnull=False).count(),
+        })
+
+
 class BacklogItemViewSet(viewsets.ModelViewSet):
     queryset = BacklogItem.objects.all()
     serializer_class = BacklogItemSerializer
+    pagination_class = BacklogPagination
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        search = request.query_params.get('search', '')
+        priority = request.query_params.get('priority', '')
+        status = request.query_params.get('status', '')
+        tab = request.query_params.get('tab', 'all')
+
+        if search:
+            queryset = queryset.filter(description__icontains=search)
+        if priority and priority != 'All':
+            queryset = queryset.filter(priority=priority)
+        if status and status != 'All':
+            queryset = queryset.filter(status=status)
+        if tab == 'pending':
+            queryset = queryset.filter(created_task__isnull=True).exclude(status='Done')
+        elif tab == 'converted':
+            queryset = queryset.filter(created_task__isnull=False)
+
+        queryset = queryset.order_by('-created_at')
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     @action(detail=False, methods=['post'])
     def generate_from_prompt(self, request):
@@ -572,49 +619,22 @@ def backlog_scan(request):
                 item['source_ref'] = meeting_ref
                 all_enhancements.append(item)
 
-        # Create BacklogItems for each enhancement
-        created_count = 0
-        created_items = []
+        # Return analysis data to frontend (NO DB creation — frontend creates when approved)
+        # Dedup against existing BacklogItems with the same source_ref
+        existing_source_refs = set(
+            BacklogItem.objects.filter(source='auto-capture')
+            .values_list('source_ref', flat=True)
+        )
+        response_items = []
         for item in all_enhancements:
-            # Build a comprehensive description from the structured fields
-            description_parts = []
-            if item.get('background'):
-                description_parts.append(f"Background / Problem Statement:\n{item['background']}")
-            if item.get('proposed_enhancement'):
-                description_parts.append(f"Proposed Enhancement:\n{item['proposed_enhancement']}")
-            if item.get('expected_benefits'):
-                description_parts.append(f"Expected Benefits / Business Impact:\n{item['expected_benefits']}")
-            if item.get('stakeholders'):
-                description_parts.append(f"Stakeholders Affected: {item['stakeholders']}")
-            if item.get('source_of_idea'):
-                description_parts.append(f"Source of Idea: {item['source_of_idea']}")
-
-            description = '\n\n---\n\n'.join(description_parts)
-
-            # Map priority
+            source_ref = item.get('source_ref', '')
+            if source_ref in existing_source_refs:
+                continue
+            md = item.get('meeting_date')
             priority = item.get('priority', 'Medium')
             if priority not in dict(BacklogItem.PRIORITY_CHOICES):
                 priority = 'Medium'
-
-            try:
-                backlog_item = BacklogItem.objects.create(
-                    description=description,
-                    priority=priority,
-                    status='Future Consideration',
-                    source='auto-capture',
-                    source_ref=item.get('source_ref', ''),
-                    meeting_date=item.get('meeting_date'),
-                )
-            except Exception as e:
-                print(f"backlog_scan: failed to create BacklogItem: {e}", file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
-                continue
-            created_count += 1
-
-            # Return structured data to frontend
-            md = item.get('meeting_date')
-            created_items.append({
-                'id': backlog_item.id,
+            response_items.append({
                 'title': item.get('title', ''),
                 'background': item.get('background', ''),
                 'proposed_enhancement': item.get('proposed_enhancement', ''),
@@ -622,17 +642,15 @@ def backlog_scan(request):
                 'stakeholders': item.get('stakeholders', ''),
                 'priority': priority,
                 'source_of_idea': item.get('source_of_idea', ''),
-                'source': f'Meeting: {item.get("meeting_title", "")}',
+                'source': source_ref,
                 'meeting_title': item.get('meeting_title', ''),
                 'meeting_date': md.isoformat() if md else None,
-                'created_at': backlog_item.created_at.isoformat(),
             })
 
         return Response({
-            'items': created_items,
+            'items': response_items,
             'total_found': len(all_enhancements),
             'processed_meetings': processed_meetings,
-            'created_count': created_count,
             'timed_out': timed_out,
             'remaining_meetings': meetings.count() - processed_meetings if timed_out else 0,
         })
