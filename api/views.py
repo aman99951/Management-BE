@@ -307,6 +307,7 @@ class MeetingViewSet(viewsets.ModelViewSet):
 
         fathom_tasks = []
         ai_created_tasks = []
+        meeting_date = meeting.recorded_at or meeting.created_at
 
         # Phase 1: Create tasks directly from Fathom raw_action_items (authoritative)
         if meeting.raw_action_items:
@@ -354,12 +355,64 @@ class MeetingViewSet(viewsets.ModelViewSet):
         all_created = fathom_tasks + ai_created_tasks
         email_result = _notify_task_assignees(all_created)
 
+        # Phase 3: Auto-generate backlog items (enhancement ideas) from the same meeting
+        backlog_created = 0
+        if meeting.transcript and settings.OPENROUTER_API_KEY and transcript_text:
+            try:
+                # Build full meeting content: summary + transcript
+                meeting_content = transcript_text
+                if meeting.summary:
+                    meeting_content = f"--- AI Summary ---\n{meeting.summary}\n\n--- Transcript ---\n{transcript_text}"
+                from .ai_service import analyze_meeting_for_enhancements
+                enhancements = analyze_meeting_for_enhancements(meeting_content, meeting.title)
+                if enhancements and isinstance(enhancements, list):
+                    # Pre-load existing hashes for dedup
+                    approved = set(
+                        BacklogItem.objects.filter(source='auto-capture')
+                        .exclude(source_ref__exact='')
+                        .values_list('source_ref', flat=True)
+                    )
+                    dismissed = set(
+                        DismissedSuggestion.objects.values_list('content_hash', flat=True)
+                    )
+                    meeting_date = meeting.recorded_at or meeting.created_at
+                    for item in enhancements:
+                        c_hash = hashlib.md5(
+                            f'{meeting.id}:{item.get("title", "")}:{item.get("proposed_enhancement", "")}'.encode()
+                        ).hexdigest()
+                        if c_hash in approved or c_hash in dismissed:
+                            continue
+                        desc_parts = []
+                        if item.get('title'): desc_parts.append(f'# {item["title"]}')
+                        if item.get('background'): desc_parts.append(f'\n**Background / Problem Statement:**\n{item["background"]}')
+                        if item.get('proposed_enhancement'): desc_parts.append(f'\n**Proposed Enhancement:**\n{item["proposed_enhancement"]}')
+                        if item.get('expected_benefits'): desc_parts.append(f'\n**Expected Benefits:**\n{item["expected_benefits"]}')
+                        if item.get('stakeholders'): desc_parts.append(f'\n**Stakeholders:** {item["stakeholders"]}')
+                        if item.get('source_of_idea'): desc_parts.append(f'\n**Source:** {item["source_of_idea"]}')
+                        if meeting.title: desc_parts.append(f'\n**From Meeting:** {meeting.title}')
+                        priority = item.get('priority', 'Medium')
+                        if priority not in dict(BacklogItem.PRIORITY_CHOICES):
+                            priority = 'Medium'
+                        BacklogItem.objects.create(
+                            description='\n'.join(desc_parts) or item.get('title', ''),
+                            priority=priority,
+                            status='Future Consideration',
+                            source='auto-capture',
+                            source_ref=c_hash,
+                            meeting_date=meeting_date,
+                        )
+                        backlog_created += 1
+            except Exception as e:
+                print(f"generate_tasks: backlog generation failed for meeting {meeting.id}: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+
         from .serializers import TaskSerializer
         return Response({
             'status': 'created',
             'fathom_task_count': len(fathom_tasks),
             'ai_task_count': len(ai_created_tasks),
             'tasks': TaskSerializer(all_created, many=True).data,
+            'backlog_items_created': backlog_created,
             'emails_sent': email_result['sent_count'],
             'emails_failed': email_result['failed_count'],
             'email_details': email_result['details'],

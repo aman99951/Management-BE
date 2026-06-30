@@ -253,32 +253,25 @@ def analyze_meeting_for_enhancements(meeting_text, meeting_title):
     else:
         chunks = [meeting_text]
 
-    base_prompt = """You are a product enhancement analyst. Analyze the following meeting conversation and identify ANY future enhancement ideas, product improvements, workflow changes, new feature suggestions, category expansions, process optimizations, or user/provider feedback.
+    base_prompt = """You are a product enhancement analyst. Analyze the following meeting conversation and extract structured backlog items (feature suggestions, improvements, etc.).
 
-Capture ANY discussion that includes:
-- A problem, pain point, limitation, or unmet need.
-- A proposed solution, feature, or improvement.
-- Suggestions for new categories, services, workflows, integrations, or operational enhancements.
-- Customer, provider, telecaller, or admin feedback that indicates a recurring issue or opportunity.
-- A new idea that could be implemented as a future project — even if it's also being worked on now.
-- Implementation details, technical discussions, or how-to conversations — these indicate real feature work.
-- Any feature, enhancement, or improvement that was discussed beyond a simple status update.
+Rules — STRICTLY follow these:
+- ONLY extract when the meeting discussion clearly describes a SPECIFIC problem AND a concrete proposed solution or feature.
+- The discussion must contain both: (1) a clear pain point or unmet need, AND (2) a specific proposed enhancement or fix (not just vague acknowledgment).
+- Simple status updates, casual mentions, or discussions where no clear solution was proposed must be SKIPPED.
+- Never invent, assume, or hallucinate details. If the transcript doesn't explicitly describe a problem+solution pair, do NOT create a backlog item.
+- Each item must represent a single, unique, actionable idea — no merging unrelated topics.
+- When unsure, SKIP. It is better to miss a marginal item than to pollute the backlog with noise.
 
-For each backlog item, capture:
+For each valid backlog item, capture:
 1. title: A concise, descriptive title (max 120 chars)
-2. background: The problem statement / context behind this idea
-3. proposed_enhancement: What the proposed solution or improvement is
-4. expected_benefits: What business impact or benefit this would bring
+2. background: The specific problem statement / context
+3. proposed_enhancement: The concrete proposed solution or improvement discussed
+4. expected_benefits: What benefit was explicitly mentioned or clearly implied
 5. stakeholders: Who is affected (choose from: Customer, Provider, Seller, Admin, Telecaller, Platform, or a combination like "Customer, Admin")
 6. priority: "Low", "Medium", "High", or "Critical"
 7. source_of_idea: Where this idea came from (choose from: "Meeting discussion", "Customer feedback", "Provider feedback", "Internal suggestion")
 8. status: "Future Consideration"
-
-Do NOT capture:
-- Simple status updates that contain no suggestion or enhancement.
-- Duplicate ideas already recorded (capture each unique idea only once).
-
-When in doubt, INCLUDE the item. It's better to over-capture and let the team review than to miss a valuable idea.
 
 Return ONLY a valid JSON array of objects with the keys listed above. If no valid backlog items are found, return an empty array [].
 """
@@ -301,7 +294,7 @@ Return ONLY a valid JSON array of objects with the keys listed above. If no vali
                     json={
                         "model": model,
                         "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.3,
+                        "temperature": 0.0,
                         "max_tokens": 2048,
                     },
                     timeout=30,
