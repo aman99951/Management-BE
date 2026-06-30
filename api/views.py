@@ -29,8 +29,13 @@ from .email_service import send_action_items_to_assignees, send_meeting_invitati
 
 def _match_employee(assignee_name):
     """Fuzzy-match an assignee name from AI against known employees.
-    Handles cases like 'Sekar D' → 'Sekar', 'Avinesh Duraimanickam' → 'Avinesh D',
-    and the reverse where AI outputs only the first name (e.g., 'Sekar' → 'Sekar D').
+    Mappings:
+      'Praveen G', 'Praveen' → 'Praveen GM'
+      'Sekar D'             → 'Sekar'
+      'karan kumar', 'Karan' → 'Karan Kumar'
+      'Avinesh'             → 'Avinesh Duraimanickam'
+      'Aman'                → 'Aman Kumar'
+      'Gajendran', 'MG', 'sir' → 'Gajendran Mani'
     """
     if not assignee_name:
         return None
@@ -38,26 +43,43 @@ def _match_employee(assignee_name):
     if not name:
         return None
 
+    # 0. Direct name aliases
+    ALIASES = {
+        'praveen g': 'Praveen GM',
+        'praveen': 'Praveen GM',
+        'sekar d': 'Sekar',
+        'karan kumar': 'Karan Kumar',
+        'karan': 'Karan Kumar',
+        'avinesh': 'Avinesh Duraimanickam',
+        'aman': 'Aman Kumar',
+        'gajendran': 'Gajendran Mani',
+        'mg': 'Gajendran Mani',
+        'sir': 'Gajendran Mani',
+    }
+    canonical = ALIASES.get(name.lower())
+    if canonical:
+        emp = Employee.objects.filter(name__iexact=canonical).first()
+        if emp:
+            return emp
+
     # 1. Exact match (case-insensitive)
     emp = Employee.objects.filter(name__iexact=name).first()
     if emp:
         return emp
 
-    # 2. AI name contains employee name as a word (e.g., 'Sekar D' contains word 'Sekar')
-    #    Filter out single-char words to avoid false matches
+    # 2. AI name contains employee name as a word
     words = [w for w in name.split() if len(w) > 1]
     if words:
         emp = Employee.objects.filter(name__in=words).first()
         if emp:
             return emp
 
-    # 3. Employee name is contained within AI name (e.g., 'Sekar' is inside 'Sekar D')
+    # 3. Employee name is contained within AI name
     for emp in Employee.objects.all():
         if emp.name.lower() in name.lower():
             return emp
 
-    # 4. AI name is contained within employee name (e.g., 'Sekar' is inside 'Sekar D')
-    #    This handles the case where AI outputs only the first name
+    # 4. AI name is contained within employee name
     name_lower = name.lower()
     for emp in Employee.objects.all():
         if name_lower in emp.name.lower():

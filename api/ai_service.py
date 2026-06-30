@@ -7,6 +7,17 @@ from django.conf import settings
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 MAX_INPUT_CHARS = 30000
+CHUNK_SIZE = 10000  # chars per chunk for transcript processing
+
+NAME_MAP_PROMPT = """
+Employee name mapping (use these ALWAYS):
+- "Praveen" or "Praveen G" -> "Praveen GM"
+- "Sekar" or "Sekar D" -> "Sekar"
+- "Karan" or "karan kumar" -> "Karan Kumar"
+- "Avinesh" -> "Avinesh Duraimanickam"
+- "Aman" or "Aman Kumar" -> "Aman Kumar"
+- "Gajendran" or "MG" or "sir" -> "Gajendran Mani"
+"""
 
 def generate_tasks_from_summary(transcript_text, meeting_title):
     api_key = settings.OPENROUTER_API_KEY
@@ -17,102 +28,121 @@ def generate_tasks_from_summary(transcript_text, meeting_title):
     model = settings.OPENROUTER_MODEL
     print(f"Calling OpenRouter model={model} input_len={len(transcript_text)}", file=sys.stderr)
 
-    if len(transcript_text) > MAX_INPUT_CHARS:
-        transcript_text = transcript_text[:MAX_INPUT_CHARS] + "\n\n[Note: transcript truncated due to length]"
+    # Split into header (Meeting Title + Transcript:) and body (entries + optional NOTE)
+    header = ""
+    body = transcript_text
+    transcript_marker = "Transcript:\n"
+    if transcript_marker in transcript_text:
+        parts = transcript_text.split(transcript_marker, 1)
+        header = parts[0] + transcript_marker
+        body = parts[1]
 
-    prompt = f"""You are a precise and THOROUGH task extraction assistant. Extract EVERY action item where someone is expected to do something in the future — do not miss any person.
+    # Separate NOTE section (existing Fathom tasks) — append to every chunk
+    note_section = ""
+    note_marker = "\n\nNOTE - "
+    if note_marker in body:
+        body_parts = body.split(note_marker, 1)
+        body = body_parts[0]
+        note_section = note_marker + body_parts[1]
 
-For each task provide:
-- title: concise title (max 100 chars) — GENERATE THIS FROM the description, DO NOT leave it blank or "Untitled"
-- description: detailed summary of what exactly needs to be done — include ALL specific requirements, features, deadlines, integrations, or action points mentioned
-- assignee: name of the person responsible — this is MANDATORY, NEVER leave it empty. Use the person's name exactly as it appears in the conversation when someone is addressed (e.g., if someone says "Praveen, can you X", the assignee is "Praveen G" if that's the speaker label, or "Praveen" if that's how they're addressed)
-- priority: "low", "medium", "high", or "critical"
+    # Split body into entries (lines), then chunk at entry boundaries
+    lines = body.split('\n')
+    chunks = []
+    current = []
+    current_size = 0
+    for line in lines:
+        line_size = len(line) + 1
+        if current_size + line_size > CHUNK_SIZE and current:
+            chunks.append('\n'.join(current))
+            current = [line]
+            current_size = line_size
+        else:
+            current.append(line)
+            current_size += line_size
+    if current:
+        chunks.append('\n'.join(current))
 
-CRITICAL RULES FOR ASSIGNEE EXTRACTION:
-- When someone is ADDRESSED BY NAME in a sentence (e.g., "Praveen, can you change the timing" or "Karan, did you ask these guys"), the person being addressed IS the assignee.
-- When the SPEAKER says they will do something ("I'll X", "I'm going to X", "I need to X"), the SPEAKER is the assignee.
-- When someone is REFERRED TO as doing something ("he'll do X", "X will handle Y"), the person referred to is the assignee.
-- If a person says "I shared X with Y" or "I gave X to Y", then Y is the assignee (task transfer).
-- The assignee name should MATCH one of these known team members: Sekar D, Aman Kumar, karan kumar, Avinesh Duraimanickam, Praveen G, Gajendran Mani, Sekar.
-- If the name used in conversation is a shorter version (e.g., "Praveen" instead of "Praveen G"), still use that shorter version as the assignee.
-- The assignee field is REQUIRED for every task. DO NOT omit it.
+    if not chunks:
+        return []
 
-DEFINITION OF A TASK (create a task for EACH of these patterns):
-1. "I will X" / "I'll X" / "I need to X" / "I have to X" / "I'm going to X" / "I'll call X" / "I'll check X" = task for that speaker.
-2. "Please do X" / "Can you X?" / "Could you X?" / "X, please handle Y" directed at someone = task for the person addressed.
-3. "He'll do X" / "She'll handle X" / "X will take care of Y" / "X will work on Y" / "X will fix it" spoken about someone = task for X.
-4. TASK TRANSFERS: When someone says "I shared X with Y, Y will do it" or "I sent X to Y, Y will handle it" or "I've given X to Y, he'll work on it" — the task belongs to Y, NOT the speaker. The receiver (Y) is the assignee.
-5. "Let me check" / "Let me look into it" / "Let me investigate" / "I'll check and come back" = task for the SPEAKER who says this, not the person they are talking to.
-6. "We need to X" with a specific person named as responsible = task for that person.
-7. Ongoing work mentioned in context of continuing today/tomorrow/this week = task (e.g., "I'm continuing X today").
-8. TIME-BOUND COMMITMENTS: When person A asks "Will you be ready by X?" and person B answers "Yes" or "By X date" — task for person B.
-9. FOLLOW-UP CALLS: "I'll call customers/providers/them" / "I'll follow up with X" = task for the speaker who says they will call.
-
-IGNORE only pure past-tense updates with no future intent (e.g., "yesterday I did X" with no follow-up).
-
-Be THOROUGH — scan the ENTIRE transcript. Extract tasks for EVERY employee who is assigned work. Include Sekar, Aman, Karan, Praveen, Avinesh, and anyone else.
-
-CRITICAL: Create a SEPARATE task entry for EACH distinct action item. Do NOT merge or combine different action items into one task — even if they belong to the same person. Each action item gets its own task with its own title and description.
-
-If someone's statement is ambiguous about who does the work, omit that item.
-
-Return ONLY a valid JSON array — no commentary.
-
-If a NOTE section lists already-captured tasks, DO NOT create duplicates of them.
+    base_prompt = f"""You extract action items from meeting transcripts.{NAME_MAP_PROMPT}
+Rules:
+- ONLY extract when someone commits to doing something (I will/I'll/I'm going to/I need to/I plan to/I'll call/I'll check/I'll follow up/I'll share/I'm working on)
+- Or when someone is assigned work (Can you/Please/Could you + acknowledgment/agreement)
+- NEVER invent or guess tasks — if there is no clear action item, skip it entirely
+- Each task MUST have: title, description, assignee, priority
+- Use the name mapping above to standardize all employee names
+- Return ONLY a valid JSON array — no commentary, no markdown
 
 Meeting: {meeting_title}
+"""
 
-Transcript:
-{transcript_text}"""
-
+    all_tasks = []
     import time
-    MAX_ATTEMPTS = 3
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            resp = requests.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "http://localhost:5173",
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2,
-                    "max_tokens": 8192,
-                },
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS} failed: {resp.status_code} {resp.text[:500]}", file=sys.stderr)
-                if attempt < MAX_ATTEMPTS - 1:
-                    time.sleep(2 ** attempt)
-                continue
-            try:
-                content = resp.json()["choices"][0]["message"]["content"]
-            except (KeyError, IndexError, json.JSONDecodeError) as e:
-                print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS} parse error: {e} body={resp.text[:500]}", file=sys.stderr)
-                if attempt < MAX_ATTEMPTS - 1:
-                    time.sleep(2 ** attempt)
-                continue
-            if not content:
-                print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS} returned empty content", file=sys.stderr)
-                if attempt < MAX_ATTEMPTS - 1:
-                    time.sleep(2 ** attempt)
-                continue
-            result = _parse_json_response(content)
-            if result:
-                return result
-            print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS}: could not parse JSON from content: {content[:500]}", file=sys.stderr)
-            if attempt < MAX_ATTEMPTS - 1:
-                time.sleep(2 ** attempt)
-        except requests.RequestException as e:
-            print(f"OpenRouter attempt {attempt+1}/{MAX_ATTEMPTS} request exception: {e}", file=sys.stderr)
-            if attempt < MAX_ATTEMPTS - 1:
-                time.sleep(2 ** attempt)
 
-    return None
+    for i, chunk in enumerate(chunks):
+        chunk_prompt = base_prompt + f"\nTranscript (part {i+1} of {len(chunks)}):\n{chunk}"
+        if note_section:
+            chunk_prompt += f"\n{note_section}"
+
+        print(f"  Chunk {i+1}/{len(chunks)} ({len(chunk)} chars)", file=sys.stderr)
+
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "http://localhost:5173",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": chunk_prompt}],
+                        "temperature": 0.0,
+                        "max_tokens": 4096,
+                    },
+                    timeout=60,
+                )
+                if resp.status_code != 200:
+                    print(f"  Chunk {i+1} attempt {attempt+1} failed: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                    continue
+                content = resp.json()["choices"][0]["message"]["content"]
+                result = _parse_json_response(content)
+                if result and isinstance(result, list):
+                    all_tasks.extend(result)
+                    print(f"  Chunk {i+1}: {len(result)} tasks", file=sys.stderr)
+                    break
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+            except requests.RequestException as e:
+                print(f"  Chunk {i+1} exception: {e}", file=sys.stderr)
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+
+    if not all_tasks:
+        return []
+
+    # Deduplicate by title similarity across chunks
+    seen_titles = set()
+    unique = []
+    for t in all_tasks:
+        title = t.get('title', '').lower().strip()
+        if not title:
+            continue
+        is_dup = False
+        for seen in seen_titles:
+            if len(title) > 5 and len(seen) > 5 and (title in seen or seen in title):
+                is_dup = True
+                break
+        if not is_dup:
+            seen_titles.add(title)
+            unique.append(t)
+
+    print(f"Total: {len(all_tasks)} raw -> {len(unique)} unique", file=sys.stderr)
+    return unique
 
 
 def enrich_fathom_task_descriptions(transcript_text, meeting_title, fathom_tasks):
@@ -194,6 +224,7 @@ def analyze_meeting_for_enhancements(meeting_text, meeting_title):
     feature suggestions, process improvements, and other backlog-worthy items.
     Returns a list of dicts with: title, background, proposed_enhancement, expected_benefits,
     stakeholders, priority, source_of_idea, status.
+    Uses chunking for long transcripts to avoid truncation.
     """
     api_key = settings.OPENROUTER_API_KEY
     if not api_key:
@@ -202,19 +233,36 @@ def analyze_meeting_for_enhancements(meeting_text, meeting_title):
 
     model = settings.OPENROUTER_MODEL
 
-    if len(meeting_text) > MAX_INPUT_CHARS:
-        meeting_text = meeting_text[:MAX_INPUT_CHARS] + "\n\n[Note: content truncated due to length]"
+    # Chunk long meeting texts
+    if len(meeting_text) > CHUNK_SIZE:
+        lines = meeting_text.split('\n')
+        chunks = []
+        current = []
+        current_size = 0
+        for line in lines:
+            line_size = len(line) + 1
+            if current_size + line_size > CHUNK_SIZE and current:
+                chunks.append('\n'.join(current))
+                current = [line]
+                current_size = line_size
+            else:
+                current.append(line)
+                current_size += line_size
+        if current:
+            chunks.append('\n'.join(current))
+    else:
+        chunks = [meeting_text]
 
-    prompt = f"""You are a product enhancement analyst. Analyze the following meeting conversation and identify ANY future enhancement ideas, product improvements, workflow changes, new feature suggestions, category expansions, process optimizations, or user/provider feedback.
+    base_prompt = """You are a product enhancement analyst. Analyze the following meeting conversation and identify ANY future enhancement ideas, product improvements, workflow changes, new feature suggestions, category expansions, process optimizations, or user/provider feedback.
 
 Capture ANY discussion that includes:
-• A problem, pain point, limitation, or unmet need.
-• A proposed solution, feature, or improvement.
-• Suggestions for new categories, services, workflows, integrations, or operational enhancements.
-• Customer, provider, telecaller, or admin feedback that indicates a recurring issue or opportunity.
-• A new idea that could be implemented as a future project — even if it's also being worked on now.
-• Implementation details, technical discussions, or how-to conversations — these indicate real feature work.
-• Any feature, enhancement, or improvement that was discussed beyond a simple status update.
+- A problem, pain point, limitation, or unmet need.
+- A proposed solution, feature, or improvement.
+- Suggestions for new categories, services, workflows, integrations, or operational enhancements.
+- Customer, provider, telecaller, or admin feedback that indicates a recurring issue or opportunity.
+- A new idea that could be implemented as a future project — even if it's also being worked on now.
+- Implementation details, technical discussions, or how-to conversations — these indicate real feature work.
+- Any feature, enhancement, or improvement that was discussed beyond a simple status update.
 
 For each backlog item, capture:
 1. title: A concise, descriptive title (max 120 chars)
@@ -227,62 +275,73 @@ For each backlog item, capture:
 8. status: "Future Consideration"
 
 Do NOT capture:
-• Simple status updates that contain no suggestion or enhancement.
-• Duplicate ideas already recorded in the transcript (capture each unique idea only once).
+- Simple status updates that contain no suggestion or enhancement.
+- Duplicate ideas already recorded (capture each unique idea only once).
 
 When in doubt, INCLUDE the item. It's better to over-capture and let the team review than to miss a valuable idea.
 
 Return ONLY a valid JSON array of objects with the keys listed above. If no valid backlog items are found, return an empty array [].
-
-Meeting Title: {meeting_title}
-
-Meeting Content:
-{meeting_text}
 """
 
+    all_items = []
     import time
-    MAX_ATTEMPTS = 2
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            resp = requests.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "http://localhost:5173",
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.3,
-                    "max_tokens": 2048,
-                },
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                print(f"analyze_meeting_for_enhancements attempt {attempt+1} failed: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
-                if attempt < MAX_ATTEMPTS - 1:
-                    time.sleep(2 ** attempt)
-                continue
-            content = resp.json()["choices"][0]["message"]["content"]
-            result = _parse_json_response(content)
-            if result and isinstance(result, list):
-                # Validate each item has the required fields
-                validated = []
-                for item in result:
-                    if isinstance(item, dict) and item.get('title') and item.get('background'):
-                        validated.append(item)
-                if validated:
-                    return validated
-            print(f"analyze_meeting_for_enhancements attempt {attempt+1}: could not parse valid result from: {content[:300]}", file=sys.stderr)
-            if attempt < MAX_ATTEMPTS - 1:
-                time.sleep(2 ** attempt)
-        except Exception as e:
-            print(f"analyze_meeting_for_enhancements attempt {attempt+1} error: {e}", file=sys.stderr)
-            if attempt < MAX_ATTEMPTS - 1:
-                time.sleep(2 ** attempt)
 
-    return []
+    for i, chunk in enumerate(chunks):
+        prompt = base_prompt + f"\nMeeting Title: {meeting_title}\n\nMeeting Content (part {i+1} of {len(chunks)}):\n{chunk}"
+
+        for attempt in range(2):
+            try:
+                resp = requests.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "http://localhost:5173",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.3,
+                        "max_tokens": 2048,
+                    },
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    print(f"enhancements chunk {i+1} attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
+                    if attempt < 1:
+                        time.sleep(2)
+                    continue
+                content = resp.json()["choices"][0]["message"]["content"]
+                result = _parse_json_response(content)
+                if result and isinstance(result, list):
+                    for item in result:
+                        if isinstance(item, dict) and item.get('title') and item.get('background'):
+                            all_items.append(item)
+                    break
+                if attempt < 1:
+                    time.sleep(2)
+            except Exception as e:
+                print(f"enhancements chunk {i+1} error: {e}", file=sys.stderr)
+                if attempt < 1:
+                    time.sleep(2)
+
+    # Deduplicate by title similarity across chunks
+    seen_titles = set()
+    unique = []
+    for item in all_items:
+        title = item.get('title', '').lower().strip()
+        if not title:
+            continue
+        is_dup = False
+        for seen in seen_titles:
+            if len(title) > 5 and len(seen) > 5 and (title in seen or seen in title):
+                is_dup = True
+                break
+        if not is_dup:
+            seen_titles.add(title)
+            unique.append(item)
+
+    return unique
 
 
 def generate_backlog_from_prompt(user_prompt):

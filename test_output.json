@@ -1,0 +1,176 @@
+[
+  {
+    "title": "Change email timing",
+    "description": "Change the timing to send the email at 6am daily.",
+    "assignee": "Praveen GM",
+    "priority": "high"
+  },
+  {
+    "title": "Share analytics insights",
+    "description": "Share the analytics insights by the end of the day.",
+    "assignee": "Praveen GM",
+    "priority": "high"
+  },
+  {
+    "title": "Check call duration counting",
+    "description": "Check with XO-TL-T if it's possible to know the exact time the calls start counting.",
+    "assignee": "Praveen GM",
+    "priority": "medium"
+  },
+  {
+    "title": "Deploy backend changes",
+    "description": "Deploy the backend changes for the timeout as discussed.",
+    "assignee": "Praveen GM",
+    "priority": "high"
+  },
+  {
+    "title": "Check today's bookings",
+    "description": "Gajendran Mani asked Praveen GM to check today's bookings and how it looks.",
+    "assignee": "Praveen GM",
+    "priority": "medium"
+  },
+  {
+    "title": "Check video shared",
+    "description": "Gajendran Mani will check the video shared by Praveen GM regarding the new screen for the service provider.",
+    "assignee": "Gajendran Mani",
+    "priority": "medium"
+  },
+  {
+    "title": "Check for nearby providers",
+    "description": "Gajendran Mani needs to check if there are any providers nearby and send a notification if there are none.",
+    "assignee": "Gajendran Mani",
+    "priority": "medium"
+  },
+  {
+    "title": "Write unit tests for radius feature",
+    "description": "Praveen GM plans to write unit tests to verify the radius feature.",
+    "assignee": "Praveen GM",
+    "priority": "high"
+  },
+  {
+    "title": "Implement radius extension logic",
+    "description": "Praveen GM is going to implement the logic to extend the radius if no providers are available.",
+    "assignee": "Praveen GM",
+    "priority": "high"
+  },
+  {
+    "title": "Work on customer calling service provider strategy",
+    "description": "Gajendran Mani mentioned that they should work on the strategy for customer calling service providers in the next build.",
+    "assignee": "Gajendran Mani",
+    "priority": "High"
+  },
+  {
+    "title": "Add trial mode for interiors and contract transactions",
+    "description": "Gajendran Mani asked Praveen GM to add trial mode for interiors and contract transactions.",
+    "assignee": "Praveen GM",
+    "priority": "Medium"
+  },
+  {
+    "title": "Track enhancement requests",
+    "description": "Gajendran Mani asked Karan Kumar to ensure that all enhancement requests are tracked and to provide a list.",
+    "assignee": "Karan Kumar",
+    "priority": "High"
+  },
+  {
+    "title": "Call customer to confirm booking",
+    "description": "Karan Kumar committed to calling the customer to confirm the booking for Wednesday.",
+    "assignee": "Karan Kumar",
+    "priority": "High"
+  },
+  {
+    "title": "Call Karthiban Karthik to contact customer",
+    "description": "Karan Kumar mentioned he will call Karthiban Karthik to ensure he contacts the customer again.",
+    "assignee": "Karan Kumar",
+    "priority": "Medium"
+  },
+  {
+    "title": "Work on pagination changes",
+    "description": "Gajendran Mani asked Aman Kumar to make changes and let him know about the pagination changes.",
+    "assignee": "Aman Kumar",
+    "priority": "High"
+  },
+  {
+    "title": "Ensure requests are not lost",
+    "description": "Gajendran Mani asked the team to ensure that all requests are tracked and not lost.",
+    "assignee": "Team",
+    "priority": "High"
+  },
+  {
+    "title": "Work on app side issues",
+    "description": "Gajendran Mani mentioned he is working on issues related to the app side.",
+    "assignee": "Gajendran Mani",
+    "priority": "Medium"
+  },
+  {
+    "title": "Check provider details",
+    "description": "Praveen will check on the provider details and share the number.",
+    "assignee": "Praveen GM",
+    "priority": "Medium"
+  },
+  {
+    "title": "Work on WhatsApp integration",
+    "description": "Gajendran will work on the WhatsApp number integration.",
+    "assignee": "Gajendran Mani",
+    "priority": "High"
+  },
+  {
+    "title": "Call service providers",
+    "description": "Karan Kumar is planning on calling the service providers who left before or after the OTP.",
+    "assignee": "Karan Kumar",
+    "priority": "Medium"
+  },
+  {
+    "title": "Update call notes",
+    "description": "Karan Kumar will use the tool to call people and then update the notes.",
+    "assignee": "Karan Kumar",
+    "priority": "Medium"
+  },
+  {
+    "title": "Work on ad management system",
+    "description": "Aman Kumar will focus on working on the ad management system.",
+    "assignee": "Aman Kumar",
+    "priority": "Medium"
+  },
+  {
+    "title": "Add dropdown for developer selection",
+    "description": "Aman Kumar is going to add a dropdown to select the developer as per the website or app rating.",
+    "assignee": "Aman Kumar",
+    "priority": "Medium"
+  },
+  {
+    "title": "Call follow-up",
+    "description": "Avinesh Duraimanickam needs to call a person today as part of the follow-up.",
+    "assignee": "Avinesh Duraimanickam",
+    "priority": "Medium"
+  },
+  {
+    "title": "Add filter for service providers and customers",
+    "description": "Praveen GM will add a filter to differentiate between customers and service providers.",
+    "assignee": "Praveen GM",
+    "priority": "High"
+  },
+  {
+    "title": "Design sub-menu for service providers and customers",
+    "description": "Aman Kumar will design a sub-menu for service providers and customers in the app.",
+    "assignee": "Aman Kumar",
+    "priority": "High"
+  },
+  {
+    "title": "Spend time on calling customers",
+    "description": "Karan Kumar and Avinesh Duraimanickam will spend at least a couple of hours daily calling customers.",
+    "assignee": "Karan Kumar",
+    "priority": "High"
+  },
+  {
+    "title": "Engage influencers",
+    "description": "Avinesh Duraimanickam will create a plan to engage influencers and determine how to start.",
+    "assignee": "Avinesh Duraimanickam",
+    "priority": "Medium"
+  },
+  {
+    "title": "Connect with Praveen about App Store Ads",
+    "description": "Avinesh Duraimanickam will connect with Praveen GM after the call to discuss App Store Ads.",
+    "assignee": "Avinesh Duraimanickam",
+    "priority": "Medium"
+  }
+]
