@@ -24,9 +24,18 @@ def generate_tasks_from_summary(transcript_text, meeting_title):
 
 For each task provide:
 - title: concise title (max 100 chars) — GENERATE THIS FROM the description, DO NOT leave it blank or "Untitled"
-- description: detailed summary of what exactly needs to be done — include ALL specific requirements, features, deadlines, integrations, or action points mentioned. Write in clear English, but capture every concrete detail from the discussion.
-- assignee: the person responsible — use their FULL name EXACTLY as it appears in the transcript speaker labels (e.g., "Sekar", "Aman Kumar", "karan kumar", "Avinesh Duraimanickam", "Praveen GM")
+- description: detailed summary of what exactly needs to be done — include ALL specific requirements, features, deadlines, integrations, or action points mentioned
+- assignee: name of the person responsible — this is MANDATORY, NEVER leave it empty. Use the person's name exactly as it appears in the conversation when someone is addressed (e.g., if someone says "Praveen, can you X", the assignee is "Praveen G" if that's the speaker label, or "Praveen" if that's how they're addressed)
 - priority: "low", "medium", "high", or "critical"
+
+CRITICAL RULES FOR ASSIGNEE EXTRACTION:
+- When someone is ADDRESSED BY NAME in a sentence (e.g., "Praveen, can you change the timing" or "Karan, did you ask these guys"), the person being addressed IS the assignee.
+- When the SPEAKER says they will do something ("I'll X", "I'm going to X", "I need to X"), the SPEAKER is the assignee.
+- When someone is REFERRED TO as doing something ("he'll do X", "X will handle Y"), the person referred to is the assignee.
+- If a person says "I shared X with Y" or "I gave X to Y", then Y is the assignee (task transfer).
+- The assignee name should MATCH one of these known team members: Sekar D, Aman Kumar, karan kumar, Avinesh Duraimanickam, Praveen G, Gajendran Mani, Sekar.
+- If the name used in conversation is a shorter version (e.g., "Praveen" instead of "Praveen G"), still use that shorter version as the assignee.
+- The assignee field is REQUIRED for every task. DO NOT omit it.
 
 DEFINITION OF A TASK (create a task for EACH of these patterns):
 1. "I will X" / "I'll X" / "I need to X" / "I have to X" / "I'm going to X" / "I'll call X" / "I'll check X" = task for that speaker.
@@ -42,8 +51,6 @@ DEFINITION OF A TASK (create a task for EACH of these patterns):
 IGNORE only pure past-tense updates with no future intent (e.g., "yesterday I did X" with no follow-up).
 
 Be THOROUGH — scan the ENTIRE transcript. Extract tasks for EVERY employee who is assigned work. Include Sekar, Aman, Karan, Praveen, Avinesh, and anyone else.
-
-Use the speaker name EXACTLY as it appears — do NOT modify names.
 
 CRITICAL: Create a SEPARATE task entry for EACH distinct action item. Do NOT merge or combine different action items into one task — even if they belong to the same person. Each action item gets its own task with its own title and description.
 
@@ -198,14 +205,16 @@ def analyze_meeting_for_enhancements(meeting_text, meeting_title):
     if len(meeting_text) > MAX_INPUT_CHARS:
         meeting_text = meeting_text[:MAX_INPUT_CHARS] + "\n\n[Note: content truncated due to length]"
 
-    prompt = f"""You are a product enhancement analyst. Analyze the following meeting conversation and identify any future enhancement ideas, product improvements, workflow changes, new feature suggestions, category expansions, process optimizations, or user/provider feedback that may lead to a future implementation.
+    prompt = f"""You are a product enhancement analyst. Analyze the following meeting conversation and identify ANY future enhancement ideas, product improvements, workflow changes, new feature suggestions, category expansions, process optimizations, or user/provider feedback.
 
-Create a backlog item ONLY if the discussion includes:
+Capture ANY discussion that includes:
 • A problem, pain point, limitation, or unmet need.
 • A proposed solution, feature, or improvement.
 • Suggestions for new categories, services, workflows, integrations, or operational enhancements.
 • Customer, provider, telecaller, or admin feedback that indicates a recurring issue or opportunity.
-• Ideas that are not part of the current sprint but could be considered in future releases.
+• A new idea that could be implemented as a future project — even if it's also being worked on now.
+• Implementation details, technical discussions, or how-to conversations — these indicate real feature work.
+• Any feature, enhancement, or improvement that was discussed beyond a simple status update.
 
 For each backlog item, capture:
 1. title: A concise, descriptive title (max 120 chars)
@@ -218,10 +227,10 @@ For each backlog item, capture:
 8. status: "Future Consideration"
 
 Do NOT capture:
-• Bug fixes already assigned to the current sprint.
-• Status updates without enhancement suggestions.
-• Duplicate ideas already recorded.
-• Implementation details unless specifically discussed.
+• Simple status updates that contain no suggestion or enhancement.
+• Duplicate ideas already recorded in the transcript (capture each unique idea only once).
+
+When in doubt, INCLUDE the item. It's better to over-capture and let the team review than to miss a valuable idea.
 
 Return ONLY a valid JSON array of objects with the keys listed above. If no valid backlog items are found, return an empty array [].
 

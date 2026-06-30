@@ -29,29 +29,47 @@ from .email_service import send_action_items_to_assignees, send_meeting_invitati
 
 def _match_employee(assignee_name):
     """Fuzzy-match an assignee name from AI against known employees.
-    Handles cases like 'Sekar D' → 'Sekar', 'Avinesh Duraimanickam' → 'Avinesh D'.
+    Handles cases like 'Sekar D' → 'Sekar', 'Avinesh Duraimanickam' → 'Avinesh D',
+    and the reverse where AI outputs only the first name (e.g., 'Sekar' → 'Sekar D').
     """
     if not assignee_name:
         return None
     name = assignee_name.strip()
+    if not name:
+        return None
+
     # 1. Exact match (case-insensitive)
     emp = Employee.objects.filter(name__iexact=name).first()
     if emp:
         return emp
-    # 2. AI name contains employee name as a substring (e.g., 'Sekar D' contains 'Sekar')
-    emp = Employee.objects.filter(name__in=name.split()).first()
-    if emp:
-        return emp
+
+    # 2. AI name contains employee name as a word (e.g., 'Sekar D' contains word 'Sekar')
+    #    Filter out single-char words to avoid false matches
+    words = [w for w in name.split() if len(w) > 1]
+    if words:
+        emp = Employee.objects.filter(name__in=words).first()
+        if emp:
+            return emp
+
     # 3. Employee name is contained within AI name (e.g., 'Sekar' is inside 'Sekar D')
     for emp in Employee.objects.all():
         if emp.name.lower() in name.lower():
             return emp
-    # 4. Any word from AI name matches any word from employee name
+
+    # 4. AI name is contained within employee name (e.g., 'Sekar' is inside 'Sekar D')
+    #    This handles the case where AI outputs only the first name
+    name_lower = name.lower()
+    for emp in Employee.objects.all():
+        if name_lower in emp.name.lower():
+            return emp
+
+    # 5. Any word from AI name matches any word from employee name
     ai_words = set(name.lower().split())
     for emp in Employee.objects.all():
         emp_words = set(emp.name.lower().split())
         if ai_words & emp_words:
             return emp
+
     return None
 
 
@@ -537,7 +555,7 @@ def backlog_scan(request):
     TIME_BUDGET = 50  # seconds — stay under Vercel Hobby 60s hard limit
 
     try:
-        days_back = 1
+        days_back = 1  # Default: last 1 day. Use custom scan date picker on Backlog page for older meetings.
         try:
             body = json.loads(request.body) if request.body else {}
             days_back = int(body.get('days_back', 1))
