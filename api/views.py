@@ -466,6 +466,7 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
         priority = request.query_params.get('priority', '')
         status = request.query_params.get('status', '')
         tab = request.query_params.get('tab', 'all')
+        release_week = request.query_params.get('release_week', '')
 
         if search:
             queryset = queryset.filter(description__icontains=search)
@@ -473,6 +474,8 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(priority=priority)
         if status and status != 'All':
             queryset = queryset.filter(status=status)
+        if release_week:
+            queryset = queryset.filter(release_week=release_week)
         if tab == 'pending':
             queryset = queryset.filter(created_task__isnull=True).exclude(status='Done')
         elif tab == 'converted':
@@ -565,6 +568,28 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
             'task': TaskSerializer(task).data,
             'backlog_item': BacklogItemSerializer(backlog_item).data,
         })
+
+    @action(detail=False, methods=['post'])
+    def auto_roll_weeks(self, request):
+        """Auto-assign release_week to items missing it.
+        Items without release_week get the current ISO week.
+        Only affects active items (not Done/Future Consideration)."""
+        from datetime import datetime
+        now = datetime.now()
+        iso_year, iso_week, _ = now.isocalendar()
+        current_week = f'W{iso_week}'
+
+        updated = []
+        qs = BacklogItem.objects.filter(
+            release_week='',
+            status__in=['New', 'Reviewed', 'In Progress'],
+        )
+        for item in qs:
+            item.release_week = current_week
+            item.save(update_fields=['release_week'])
+            updated.append(item.id)
+
+        return Response({'updated_count': len(updated), 'week': current_week})
 
 
 @api_view(['POST'])
