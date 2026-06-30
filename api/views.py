@@ -16,13 +16,14 @@ from google.auth.transport import requests as google_requests
 import json
 import os
 import sys
+import hashlib
 import traceback
 from datetime import datetime, timedelta
 from django.db.models import Count, Q
 from django.db.models.functions import TruncDay
 from django.utils import timezone
 import requests as http_requests
-from .models import Employee, Meeting, Task, FathomConfig, Comment, GoogleCalendarToken, ScheduledMeeting, Notification, BacklogItem
+from .models import Employee, Meeting, Task, FathomConfig, Comment, GoogleCalendarToken, ScheduledMeeting, Notification, BacklogItem, DismissedSuggestion
 from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, FathomWebhookSerializer, CommentSerializer, GoogleCalendarTokenSerializer, ScheduledMeetingSerializer, NotificationSerializer, BacklogItemSerializer
 from .email_service import send_action_items_to_assignees, send_meeting_invitation, send_meeting_created_notification, send_task_assignment_email, send_batch_tasks_email
 
@@ -595,6 +596,7 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
 @api_view(['POST'])
 def backlog_scan(request):
     """AI-powered scan: analyze full meeting conversations to extract structured product enhancement ideas.
+    Uses content-hash dedup against approved BacklogItems and DismissedSuggestions to avoid duplicates.
     Accepts optional POST body: {"days_back": N} — only scans meetings from last N days (default: 1).
     Uses a time budget to avoid Vercel Hobby 60s timeout — returns partial results if exceeded."""
     import traceback
@@ -602,7 +604,7 @@ def backlog_scan(request):
     TIME_BUDGET = 50  # seconds — stay under Vercel Hobby 60s hard limit
 
     try:
-        days_back = 1  # Default: last 1 day. Use custom scan date picker on Backlog page for older meetings.
+        days_back = 1
         try:
             body = json.loads(request.body) if request.body else {}
             days_back = int(body.get('days_back', 1))
@@ -621,25 +623,32 @@ def backlog_scan(request):
         if since_date:
             meetings = meetings.filter(created_at__gte=since_date)
 
-        # Load existing source_refs to avoid duplicate creation
-        existing_sources = set(BacklogItem.objects.filter(source='auto-capture').values_list('source_ref', flat=True))
+        # Pre-load all approved & dismissed hashes for O(1) dedup
+        approved_hashes = set(
+            BacklogItem.objects.filter(source='auto-capture')
+            .exclude(source_ref__exact='')
+            .values_list('source_ref', flat=True)
+        )
+        dismissed_hashes = set(
+            DismissedSuggestion.objects.values_list('content_hash', flat=True)
+        )
+
+        def _content_hash(meeting_id, title, proposed_enhancement):
+            raw = f'{meeting_id}:{title}:{proposed_enhancement}'
+            return hashlib.md5(raw.encode()).hexdigest()
 
         all_enhancements = []
+        new_candidates = []
         processed_meetings = 0
         timed_out = False
         start_time = time.time()
 
         for meeting in meetings:
-            # Check time budget before each meeting
             if time.time() - start_time >= TIME_BUDGET:
                 timed_out = True
                 break
 
-            meeting_ref = f'Meeting: {meeting.title} (ID: {meeting.id})'
-            if meeting_ref in existing_sources:
-                continue
-
-            # Build full meeting content with defensive parsing
+            # Build full meeting content
             meeting_text_parts = []
             if meeting.summary:
                 meeting_text_parts.append(f"--- AI Summary ---\n{meeting.summary}")
@@ -649,7 +658,6 @@ def backlog_scan(request):
                 elif isinstance(meeting.transcript, list):
                     transcript_lines = []
                     for chunk in meeting.transcript:
-                        # Defensive: chunk may be a non-dict (e.g. string) — handle gracefully
                         if isinstance(chunk, dict):
                             speaker = chunk.get('speaker', {})
                             speaker_name = speaker.get('display_name', 'Unknown') if isinstance(speaker, dict) else 'Unknown'
@@ -668,7 +676,7 @@ def backlog_scan(request):
             if not meeting_text:
                 continue
 
-            # Send to AI for comprehensive analysis
+            # Send to AI
             try:
                 enhancements = analyze_meeting_for_enhancements(meeting_text, meeting.title)
             except Exception as e:
@@ -678,28 +686,31 @@ def backlog_scan(request):
             processed_meetings += 1
 
             for item in enhancements:
+                c_hash = _content_hash(meeting.id, item.get('title', ''), item.get('proposed_enhancement', ''))
+                item['content_hash'] = c_hash
                 item['meeting_id'] = meeting.id
                 item['meeting_title'] = meeting.title
                 item['meeting_date'] = meeting.recorded_at
-                item['source_ref'] = meeting_ref
                 all_enhancements.append(item)
 
-        # Return analysis data to frontend (NO DB creation — frontend creates when approved)
-        # Dedup against existing BacklogItems with the same source_ref
-        existing_source_refs = set(
-            BacklogItem.objects.filter(source='auto-capture')
-            .values_list('source_ref', flat=True)
-        )
+                # Dedup: skip if already approved or dismissed
+                if c_hash in approved_hashes or c_hash in dismissed_hashes:
+                    continue
+                new_candidates.append(item)
+
+            # Mark meeting as scanned
+            if not timed_out:
+                Meeting.objects.filter(id=meeting.id).update(last_scanned_at=timezone.now())
+
+        # Build response for new candidates only
         response_items = []
-        for item in all_enhancements:
-            source_ref = item.get('source_ref', '')
-            if source_ref in existing_source_refs:
-                continue
+        for item in new_candidates:
             md = item.get('meeting_date')
             priority = item.get('priority', 'Medium')
             if priority not in dict(BacklogItem.PRIORITY_CHOICES):
                 priority = 'Medium'
             response_items.append({
+                'content_hash': item.get('content_hash', ''),
                 'title': item.get('title', ''),
                 'background': item.get('background', ''),
                 'proposed_enhancement': item.get('proposed_enhancement', ''),
@@ -707,7 +718,7 @@ def backlog_scan(request):
                 'stakeholders': item.get('stakeholders', ''),
                 'priority': priority,
                 'source_of_idea': item.get('source_of_idea', ''),
-                'source': source_ref,
+                'meeting_id': item.get('meeting_id'),
                 'meeting_title': item.get('meeting_title', ''),
                 'meeting_date': md.isoformat() if md else None,
             })
@@ -715,6 +726,7 @@ def backlog_scan(request):
         return Response({
             'items': response_items,
             'total_found': len(all_enhancements),
+            'new_count': len(new_candidates),
             'processed_meetings': processed_meetings,
             'timed_out': timed_out,
             'remaining_meetings': meetings.count() - processed_meetings if timed_out else 0,
@@ -726,6 +738,30 @@ def backlog_scan(request):
             'error': 'Internal server error during backlog scan',
             'detail': str(e),
         }, status=500)
+
+
+@api_view(['POST'])
+def dismiss_suggestion(request):
+    """Dismiss an AI-generated enhancement so it won't reappear on future scans.
+    Accepts POST body: {"meeting_id": N, "content_hash": "..."}"""
+    try:
+        body = json.loads(request.body) if request.body else {}
+        meeting_id = body.get('meeting_id')
+        content_hash = body.get('content_hash', '').strip()
+        if not meeting_id or not content_hash:
+            return Response({'error': 'meeting_id and content_hash are required'}, status=400)
+
+        meeting = Meeting.objects.filter(id=meeting_id).first()
+        if not meeting:
+            return Response({'error': 'Meeting not found'}, status=404)
+
+        DismissedSuggestion.objects.get_or_create(
+            meeting=meeting,
+            content_hash=content_hash,
+        )
+        return Response({'status': 'dismissed'})
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
 
 
 @api_view(['GET', 'POST'])

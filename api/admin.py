@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Employee, Meeting, Task, Comment, FathomConfig, FathomUserToken, GoogleCalendarToken, ScheduledMeeting, Notification, BacklogItem
+from .models import Employee, Meeting, Task, Comment, FathomConfig, FathomUserToken, GoogleCalendarToken, ScheduledMeeting, Notification, BacklogItem, DismissedSuggestion
 
 
 @admin.register(Employee)
@@ -85,6 +85,17 @@ class NotificationAdmin(admin.ModelAdmin):
     def short_title(self, obj):
         return obj.title[:60] + ('...' if len(obj.title) > 60 else '')
     short_title.short_description = 'Title'
+
+
+@admin.register(DismissedSuggestion)
+class DismissedSuggestionAdmin(admin.ModelAdmin):
+    list_display = ['meeting', 'content_hash_short', 'dismissed_at']
+    list_filter = ['dismissed_at']
+    date_hierarchy = 'dismissed_at'
+
+    def content_hash_short(self, obj):
+        return obj.content_hash[:16] + '...' if len(obj.content_hash) > 16 else obj.content_hash
+    content_hash_short.short_description = 'Hash'
 
 
 @admin.register(BacklogItem)

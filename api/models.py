@@ -21,6 +21,7 @@ class Meeting(models.Model):
     raw_summary = models.JSONField(null=True, blank=True)
     raw_action_items = models.JSONField(null=True, blank=True)
     transcript = models.JSONField(null=True, blank=True)
+    last_scanned_at = models.DateTimeField(null=True, blank=True, help_text='When backlog_scan last processed this meeting')
     created_at = models.DateTimeField(auto_now_add=True)
 
     @property
@@ -166,6 +167,18 @@ class BacklogItem(models.Model):
 
     def __str__(self):
         return self.description[:80]
+
+class DismissedSuggestion(models.Model):
+    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, related_name='dismissed_suggestions')
+    content_hash = models.CharField(max_length=64, help_text='MD5 hash of meeting_id + title + proposed_enhancement')
+    dismissed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['meeting', 'content_hash']
+
+    def __str__(self):
+        return f'{self.meeting.title} — {self.content_hash[:12]}...'
+
 
 class Notification(models.Model):
     recipient = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='notifications')

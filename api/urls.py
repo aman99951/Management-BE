@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter, SimpleRouter
-from .views import EmployeeViewSet, MeetingViewSet, TaskViewSet, fathom_config_view, fathom_sync_view, fathom_webhook_view, dashboard_stats, auth_session, auth_logout, google_auth, oauth_sso, verify_sso, fathom_recording_detail, fathom_oauth_url, fathom_oauth_callback, extract_tasks_all, generate_ai_tasks, google_calendar_status, google_calendar_auth_url, google_calendar_oauth_callback, google_calendar_create_meet, google_calendar_list_events, google_calendar_sync, google_calendar_disconnect, ScheduledMeetingViewSet, notifications_list, notifications_mark_read, BacklogItemViewSet, backlog_scan
+from .views import EmployeeViewSet, MeetingViewSet, TaskViewSet, fathom_config_view, fathom_sync_view, fathom_webhook_view, dashboard_stats, auth_session, auth_logout, google_auth, oauth_sso, verify_sso, fathom_recording_detail, fathom_oauth_url, fathom_oauth_callback, extract_tasks_all, generate_ai_tasks, google_calendar_status, google_calendar_auth_url, google_calendar_oauth_callback, google_calendar_create_meet, google_calendar_list_events, google_calendar_sync, google_calendar_disconnect, ScheduledMeetingViewSet, notifications_list, notifications_mark_read, BacklogItemViewSet, backlog_scan, dismiss_suggestion
 
 router = DefaultRouter()
 router.register(r'employees', EmployeeViewSet)
@@ -11,6 +11,7 @@ router.register(r'backlog', BacklogItemViewSet)
 
 urlpatterns = [
     path('backlog/scan/', backlog_scan),
+    path('backlog/dismiss-suggestion/', dismiss_suggestion),
     path('tasks/generate-ai/', generate_ai_tasks),
     path('', include(router.urls)),
     path('fathom/config/', fathom_config_view),
