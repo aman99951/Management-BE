@@ -402,6 +402,102 @@ User prompt:
     return None
 
 
+def classify_fathom_action_items(action_items, transcript_text):
+    """
+    Classify Fathom raw action items as "task", "backlog", or "discard".
+    Sends all items in one batch AI call for efficiency.
+    Returns a dict mapping each index (0-based) to its classification.
+    On failure or empty input, returns {}.
+    """
+    if not action_items or not transcript_text:
+        return {}
+
+    api_key = settings.OPENROUTER_API_KEY
+    if not api_key:
+        print("OPENROUTER_API_KEY is not set", file=sys.stderr)
+        return {}
+
+    model = settings.OPENROUTER_MODEL
+
+    # Build item list for the prompt
+    items_block = []
+    for i, item in enumerate(action_items):
+        desc = (item.get('description') or '').strip()
+        assignee = item.get('assignee', {}) or {}
+        aname = assignee.get('name', '') or ''
+        items_block.append(f'  Item {i}: "{desc}" (assignee: {aname})')
+
+    if not items_block:
+        return {}
+
+    # Truncate transcript if too long
+    if len(transcript_text) > 15000:
+        transcript_preview = transcript_text[:15000] + "\n\n...[transcript truncated]"
+    else:
+        transcript_preview = transcript_text
+
+    prompt = f"""You classify action items extracted from a meeting as either "task", "backlog", or "discard".
+
+Rules:
+- "task": Someone committed to do it (I will, I'll, I need to, I'm going to, I'll check, I'll follow up), or was directly assigned work (Can you / Could you / Please + acknowledgment). There is clear ownership and the action is expected to happen soon. Look for commitment language in the transcript context.
+- "backlog": A feature idea, improvement suggestion, or enhancement — discussed with language like "we should", "we need to", "it would be good to", "maybe we can", "add to backlog", "put in backlog", "future consideration". There is a problem + solution pair but no person explicitly committed to doing it NOW.
+- "discard": Routine update, status report, casual mention, or clearly fabricated item with no trace in the meeting discussion.
+
+Use the transcript below as evidence to verify each item. If an item's description has NO support in the transcript (keywords don't appear, concept isn't discussed), classify it as "discard".
+
+Return ONLY a valid JSON object mapping item numbers to classifications, like:
+{{"0": "task", "1": "backlog", "2": "discard"}}
+
+Transcript:
+{transcript_preview}
+
+Items to classify:
+{chr(10).join(items_block)}"""
+
+    import time
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "http://localhost:5173",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                    "max_tokens": 1500,
+                },
+                timeout=60,
+            )
+            if resp.status_code != 200:
+                print(f"classify_fathom_action_items attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                continue
+            content = resp.json()["choices"][0]["message"]["content"]
+            result = _parse_json_response(content)
+            if result and isinstance(result, dict):
+                # Normalize keys to string ints
+                normalized = {}
+                for k, v in result.items():
+                    if isinstance(v, str) and v in ('task', 'backlog', 'discard'):
+                        normalized[str(k)] = v
+                if normalized:
+                    return normalized
+            print(f"classify_fathom_action_items attempt {attempt+1}: bad parse", file=sys.stderr)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+        except Exception as e:
+            print(f"classify_fathom_action_items attempt {attempt+1} error: {e}", file=sys.stderr)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+
+    return {}
+
+
 def _parse_json_response(content):
     if not content:
         return None

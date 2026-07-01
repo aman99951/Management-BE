@@ -109,10 +109,11 @@ def _generate_title_from_description(description):
 
 def _create_tasks_from_fathom_action_items(meeting):
     """Create Task objects directly from Fathom's raw_action_items (source='fathom').
-    These are explicitly captured during the meeting and are the authoritative source.
-    Uses assignee email for reliable employee matching. 100% capture guaranteed.
-    Checks DB for existing tasks with same (meeting, title, assigned_to) to prevent
-    cross-source duplicates.
+    Uses AI classification to route each item as "task", "backlog", or "discard":
+      - "task"      → creates a Task (current behavior, source='fathom')
+      - "backlog"   → creates a BacklogItem instead (source='auto-capture')
+      - "discard"   → skips the item entirely (likely hallucinated)
+    Falls back to creating a Task if classification fails.
     """
     if not meeting.raw_action_items:
         return []
@@ -121,7 +122,21 @@ def _create_tasks_from_fathom_action_items(meeting):
     meeting_date = meeting.recorded_at or meeting.created_at
     seen_dedup_keys = set()
 
-    for item in meeting.raw_action_items:
+    # Build transcript text for classifier
+    transcript_text = ''
+    if meeting.transcript:
+        for entry in meeting.transcript:
+            speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
+            text = entry.get('text', '')
+            transcript_text += f"{speaker}: {text}\n"
+
+    # Batch-classify all items
+    classifications = {}
+    if transcript_text:
+        from .ai_service import classify_fathom_action_items
+        classifications = classify_fathom_action_items(meeting.raw_action_items, transcript_text)
+
+    for idx, item in enumerate(meeting.raw_action_items):
         description = (item.get('description') or '').strip()
         if not description:
             continue
@@ -134,6 +149,9 @@ def _create_tasks_from_fathom_action_items(meeting):
             continue
         seen_dedup_keys.add(dedup_key)
 
+        # Determine classification (default to 'task' if classifier fails or misses)
+        classification = classifications.get(str(idx), 'task')
+
         employee = None
         email = assignee_data.get('email')
         if email:
@@ -145,6 +163,27 @@ def _create_tasks_from_fathom_action_items(meeting):
 
         title = _generate_title_from_description(description)
 
+        if classification == 'discard':
+            # Skip entirely — likely hallucinated
+            continue
+
+        if classification == 'backlog':
+            # Route to BacklogItem instead of Task
+            desc_hash = hashlib.md5(description.encode('utf-8')).hexdigest()
+            src_ref = f"fathom:{desc_hash}"
+            if BacklogItem.objects.filter(source_ref=src_ref).exists():
+                continue
+            BacklogItem.objects.create(
+                description=description,
+                priority='Medium',
+                status='Future Consideration',
+                source='auto-capture',
+                source_ref=src_ref,
+                meeting_date=meeting_date,
+            )
+            continue
+
+        # Default: 'task' (or unknown) — create Task
         if Task.objects.filter(meeting=meeting, title__iexact=title, assigned_to=employee).exists():
             continue
 
