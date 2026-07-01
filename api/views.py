@@ -560,6 +560,8 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
         status = request.query_params.get('status', '')
         tab = request.query_params.get('tab', 'all')
         release_week = request.query_params.get('release_week', '')
+        date_from = request.query_params.get('date_from', '')
+        date_to = request.query_params.get('date_to', '')
 
         if search:
             queryset = queryset.filter(description__icontains=search)
@@ -569,6 +571,10 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(status=status)
         if release_week:
             queryset = queryset.filter(release_week=release_week)
+        if date_from:
+            queryset = queryset.filter(meeting_date__date__gte=date_from)
+        if date_to:
+            queryset = queryset.filter(meeting_date__date__lte=date_to)
         if tab == 'pending':
             queryset = queryset.filter(created_task__isnull=True).exclude(status='Done')
         elif tab == 'converted':
