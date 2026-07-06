@@ -147,6 +147,7 @@ class BacklogItem(models.Model):
         ('Reviewed', 'Reviewed'),
         ('In Progress', 'In Progress'),
         ('Done', 'Done'),
+        ('Closed', 'Closed'),
         ('Future Consideration', 'Future Consideration'),
     ]
     description = models.TextField()
@@ -158,6 +159,7 @@ class BacklogItem(models.Model):
     source_ref = models.CharField(max_length=500, blank=True, help_text='Reference to the source meeting/comment')
     meeting_date = models.DateTimeField(null=True, blank=True, help_text='Date/time of the source meeting')
     release_week = models.CharField(max_length=4, blank=True, help_text='Target release week e.g. W25, W26')
+    eta = models.DateField(null=True, blank=True, help_text='Estimated completion date')
     created_task = models.ForeignKey('Task', on_delete=models.SET_NULL, null=True, blank=True, related_name='backlog_source', help_text='Task auto-created from this backlog item')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

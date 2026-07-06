@@ -542,7 +542,7 @@ class BacklogPagination(PageNumberPagination):
             'next': self.get_next_link(),
             'previous': self.get_previous_link(),
             'results': data,
-            'pending_count': BacklogItem.objects.filter(created_task__isnull=True).exclude(status='Done').count(),
+            'pending_count': BacklogItem.objects.filter(created_task__isnull=True).exclude(status__in=['Done', 'Closed']).count(),
             'converted_count': BacklogItem.objects.filter(created_task__isnull=False).count(),
         })
 
@@ -562,6 +562,9 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
         release_week = request.query_params.get('release_week', '')
         date_from = request.query_params.get('date_from', '')
         date_to = request.query_params.get('date_to', '')
+        owner = request.query_params.get('owner', '')
+        created_from = request.query_params.get('created_from', '')
+        created_to = request.query_params.get('created_to', '')
 
         if search:
             queryset = queryset.filter(description__icontains=search)
@@ -575,8 +578,14 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(meeting_date__date__gte=date_from)
         if date_to:
             queryset = queryset.filter(meeting_date__date__lte=date_to)
+        if owner:
+            queryset = queryset.filter(owner_id=owner)
+        if created_from:
+            queryset = queryset.filter(created_at__date__gte=created_from)
+        if created_to:
+            queryset = queryset.filter(created_at__date__lte=created_to)
         if tab == 'pending':
-            queryset = queryset.filter(created_task__isnull=True).exclude(status='Done')
+            queryset = queryset.filter(created_task__isnull=True).exclude(status__in=['Done', 'Closed'])
         elif tab == 'converted':
             queryset = queryset.filter(created_task__isnull=False)
 
@@ -666,6 +675,28 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
             'status': 'converted',
             'task': TaskSerializer(task).data,
             'backlog_item': BacklogItemSerializer(backlog_item).data,
+        })
+
+    @action(detail=True, methods=['post'])
+    def close(self, request, pk=None):
+        """Close a backlog item (status → Done). If a task was promoted
+        from this backlog item, also close that task (status → completed)."""
+        backlog_item = self.get_object()
+        backlog_item.status = 'Closed'
+        backlog_item.save(update_fields=['status'])
+
+        closed_task = None
+        if backlog_item.created_task:
+            task = backlog_item.created_task
+            if task.status != 'completed':
+                task.status = 'completed'
+                task.save(update_fields=['status'])
+                closed_task = TaskSerializer(task).data
+
+        return Response({
+            'status': 'closed',
+            'backlog_item': BacklogItemSerializer(backlog_item).data,
+            'closed_task': closed_task,
         })
 
     @action(detail=False, methods=['post'])
@@ -1164,6 +1195,30 @@ def dashboard_stats(request):
         .order_by('day')
     )
 
+    # Backlog stats
+    total_backlog = BacklogItem.objects.count()
+    pending_backlog = BacklogItem.objects.filter(created_task__isnull=True).exclude(status__in=['Done', 'Closed']).count()
+    backlog_by_assignee = (
+        BacklogItem.objects.filter(created_task__isnull=True)
+        .exclude(status__in=['Done', 'Closed'])
+        .exclude(owner__isnull=True)
+        .values('owner__id', 'owner__name')
+        .annotate(count=Count('id'))
+        .order_by('-count')
+    )
+    backlog_aging = []
+    now = timezone.now()
+    for bi in BacklogItem.objects.filter(created_task__isnull=True).exclude(status__in=['Done', 'Closed']).only('id', 'created_at', 'eta', 'description'):
+        age_days = (now - bi.created_at).days
+        overdue = bi.eta and bi.eta < now.date()
+        backlog_aging.append({
+            'id': bi.id,
+            'description': bi.description[:80],
+            'age_days': age_days,
+            'eta': bi.eta.isoformat() if bi.eta else None,
+            'overdue': bool(overdue),
+        })
+
     return Response({
         'total_meetings': Meeting.objects.count(),
         'total_tasks': total_tasks,
@@ -1180,6 +1235,13 @@ def dashboard_stats(request):
             {'date': t['day'].isoformat() if t['day'] else '', 'count': t['count']}
             for t in task_trends
         ],
+        'total_backlog': total_backlog,
+        'pending_backlog': pending_backlog,
+        'backlog_by_assignee': [
+            {'id': b['owner__id'], 'name': b['owner__name'], 'count': b['count']}
+            for b in backlog_by_assignee
+        ],
+        'backlog_aging': backlog_aging,
     })
 
 @csrf_exempt
