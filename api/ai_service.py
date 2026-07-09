@@ -8,6 +8,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 MAX_INPUT_CHARS = 30000
 CHUNK_SIZE = 10000  # chars per chunk for transcript processing
+FALLBACK_MODEL = "google/gemma-4-31b-it:free"  # fallback when primary model is rate-limited or unavailable
 
 NAME_MAP_PROMPT = """
 Employee name mapping (use these ALWAYS):
@@ -87,40 +88,62 @@ Meeting: {meeting_title}
 
         print(f"  Chunk {i+1}/{len(chunks)} ({len(chunk)} chars)", file=sys.stderr)
 
-        for attempt in range(3):
-            try:
-                resp = requests.post(
-                    OPENROUTER_URL,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "http://localhost:5173",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": chunk_prompt}],
-                        "temperature": 0.0,
-                        "max_tokens": 4096,
-                    },
-                    timeout=60,
-                )
-                if resp.status_code != 200:
-                    print(f"  Chunk {i+1} attempt {attempt+1} failed: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
+        # Try primary model, then fallback if rate-limited
+        models_to_try = [model]
+        if model != FALLBACK_MODEL:
+            models_to_try.append(FALLBACK_MODEL)
+
+        chunk_success = False
+        for current_model in models_to_try:
+            if chunk_success:
+                break
+            for attempt in range(3):
+                try:
+                    resp = requests.post(
+                        OPENROUTER_URL,
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                            "HTTP-Referer": "http://localhost:5173",
+                        },
+                        json={
+                            "model": current_model,
+                            "messages": [{"role": "user", "content": chunk_prompt}],
+                            "temperature": 0.0,
+                            "max_tokens": 4096,
+                        },
+                        timeout=60,
+                    )
+                    if resp.status_code != 200:
+                        is_429 = resp.status_code == 429
+                        is_402 = resp.status_code == 402
+                        print(f"  Chunk {i+1} model={current_model} attempt {attempt+1} failed: {resp.status_code} {resp.text[:200]}", file=sys.stderr)
+                        if is_402:
+                            print(f"    Insufficient credits — cannot use {current_model}", file=sys.stderr)
+                            break  # skip to next model
+                        if attempt < 2:
+                            # Longer backoff for rate limiting (429)
+                            delay = 10 if is_429 else (2 ** attempt)
+                            print(f"    Retrying in {delay}s...", file=sys.stderr)
+                            time.sleep(delay)
+                        continue
+                    content = resp.json()["choices"][0]["message"]["content"]
+                    result = _parse_json_response(content)
+                    if result and isinstance(result, list):
+                        all_tasks.extend(result)
+                        print(f"  Chunk {i+1}: {len(result)} tasks", file=sys.stderr)
+                        chunk_success = True
+                        break
+                    print(f"  Chunk {i+1} attempt {attempt+1}: parse failed, raw: {content[:200]}", file=sys.stderr)
                     if attempt < 2:
                         time.sleep(2 ** attempt)
-                    continue
-                content = resp.json()["choices"][0]["message"]["content"]
-                result = _parse_json_response(content)
-                if result and isinstance(result, list):
-                    all_tasks.extend(result)
-                    print(f"  Chunk {i+1}: {len(result)} tasks", file=sys.stderr)
-                    break
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
-            except requests.RequestException as e:
-                print(f"  Chunk {i+1} exception: {e}", file=sys.stderr)
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
+                except requests.RequestException as e:
+                    print(f"  Chunk {i+1} model={current_model} exception: {e}", file=sys.stderr)
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+
+        if not chunk_success:
+            print(f"  Chunk {i+1}: all models failed, skipping", file=sys.stderr)
 
     if not all_tasks:
         return []
@@ -181,39 +204,49 @@ Transcript:
 {transcript_text}"""
 
     import time
-    MAX_ATTEMPTS = 2
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            resp = requests.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "http://localhost:5173",
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.3,
-                    "max_tokens": 2048,
-                },
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                print(f"enrich_fathom attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
+    MAX_ATTEMPTS = 3
+    models_to_try = [model]
+    if model != FALLBACK_MODEL:
+        models_to_try.append(FALLBACK_MODEL)
+
+    for current_model in models_to_try:
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                resp = requests.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "http://localhost:5173",
+                    },
+                    json={
+                        "model": current_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.3,
+                        "max_tokens": 2048,
+                    },
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    is_429 = resp.status_code == 429
+                    is_402 = resp.status_code == 402
+                    print(f"enrich_fathom model={current_model} attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
+                    if is_402:
+                        break
+                    if attempt < MAX_ATTEMPTS - 1:
+                        delay = 10 if is_429 else (2 ** attempt)
+                        time.sleep(delay)
+                    continue
+                content = resp.json()["choices"][0]["message"]["content"]
+                result = _parse_json_response(content)
+                if result and isinstance(result, list) and len(result) > 0:
+                    return result
                 if attempt < MAX_ATTEMPTS - 1:
                     time.sleep(2 ** attempt)
-                continue
-            content = resp.json()["choices"][0]["message"]["content"]
-            result = _parse_json_response(content)
-            if result and isinstance(result, list) and len(result) > 0:
-                return result
-            if attempt < MAX_ATTEMPTS - 1:
-                time.sleep(2 ** attempt)
-        except Exception as e:
-            print(f"enrich_fathom attempt {attempt+1} error: {e}", file=sys.stderr)
-            if attempt < MAX_ATTEMPTS - 1:
-                time.sleep(2 ** attempt)
+            except Exception as e:
+                print(f"enrich_fathom model={current_model} attempt {attempt+1} error: {e}", file=sys.stderr)
+                if attempt < MAX_ATTEMPTS - 1:
+                    time.sleep(2 ** attempt)
 
     return None
 
@@ -279,44 +312,58 @@ Return ONLY a valid JSON array of objects with the keys listed above. If no vali
     all_items = []
     import time
 
+    models_to_try = [model]
+    if model != FALLBACK_MODEL:
+        models_to_try.append(FALLBACK_MODEL)
+
     for i, chunk in enumerate(chunks):
         prompt = base_prompt + f"\nMeeting Title: {meeting_title}\n\nMeeting Content (part {i+1} of {len(chunks)}):\n{chunk}"
 
-        for attempt in range(2):
-            try:
-                resp = requests.post(
-                    OPENROUTER_URL,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "http://localhost:5173",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.0,
-                        "max_tokens": 2048,
-                    },
-                    timeout=30,
-                )
-                if resp.status_code != 200:
-                    print(f"enhancements chunk {i+1} attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
-                    if attempt < 1:
-                        time.sleep(2)
-                    continue
-                content = resp.json()["choices"][0]["message"]["content"]
-                result = _parse_json_response(content)
-                if result and isinstance(result, list):
-                    for item in result:
-                        if isinstance(item, dict) and item.get('title') and item.get('background'):
-                            all_items.append(item)
-                    break
-                if attempt < 1:
-                    time.sleep(2)
-            except Exception as e:
-                print(f"enhancements chunk {i+1} error: {e}", file=sys.stderr)
-                if attempt < 1:
-                    time.sleep(2)
+        chunk_success = False
+        for current_model in models_to_try:
+            if chunk_success:
+                break
+            for attempt in range(3):
+                try:
+                    resp = requests.post(
+                        OPENROUTER_URL,
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                            "HTTP-Referer": "http://localhost:5173",
+                        },
+                        json={
+                            "model": current_model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": 0.0,
+                            "max_tokens": 2048,
+                        },
+                        timeout=30,
+                    )
+                    if resp.status_code != 200:
+                        is_429 = resp.status_code == 429
+                        is_402 = resp.status_code == 402
+                        print(f"enhancements chunk {i+1} model={current_model} attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
+                        if is_402:
+                            break
+                        if attempt < 2:
+                            delay = 10 if is_429 else (2 ** attempt)
+                            time.sleep(delay)
+                        continue
+                    content = resp.json()["choices"][0]["message"]["content"]
+                    result = _parse_json_response(content)
+                    if result and isinstance(result, list):
+                        for item in result:
+                            if isinstance(item, dict) and item.get('title') and item.get('background'):
+                                all_items.append(item)
+                        chunk_success = True
+                        break
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                except Exception as e:
+                    print(f"enhancements chunk {i+1} model={current_model} error: {e}", file=sys.stderr)
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
 
     # Deduplicate by title similarity across chunks
     seen_titles = set()
@@ -362,42 +409,51 @@ User prompt:
 """
 
     import time
-    for attempt in range(3):
-        try:
-            resp = requests.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "http://localhost:5173",
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.3,
-                    "max_tokens": 1000,
-                },
-                timeout=20,
-            )
-            if resp.status_code != 200:
-                print(f"generate_backlog_from_prompt attempt {attempt+1} failed: {resp.status_code} {resp.text[:300]}", file=sys.stderr)
+    models_to_try = [model]
+    if model != FALLBACK_MODEL:
+        models_to_try.append(FALLBACK_MODEL)
+    for current_model in models_to_try:
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "http://localhost:5173",
+                    },
+                    json={
+                        "model": current_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.3,
+                        "max_tokens": 1000,
+                    },
+                    timeout=20,
+                )
+                if resp.status_code != 200:
+                    is_429 = resp.status_code == 429
+                    is_402 = resp.status_code == 402
+                    print(f"generate_backlog_from_prompt model={current_model} attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
+                    if is_402:
+                        break
+                    if attempt < 2:
+                        delay = 10 if is_429 else (2 ** attempt)
+                        time.sleep(delay)
+                    continue
+                content = resp.json()["choices"][0]["message"]["content"]
+                result = _parse_json_response(content)
+                if result and isinstance(result, dict) and result.get("description"):
+                    return {
+                        "description": result["description"].strip(),
+                        "priority": result.get("priority", "Medium"),
+                    }
+                print(f"generate_backlog_from_prompt model={current_model} attempt {attempt+1}: bad parse: {content[:200]}", file=sys.stderr)
                 if attempt < 2:
                     time.sleep(2 ** attempt)
-                continue
-            content = resp.json()["choices"][0]["message"]["content"]
-            result = _parse_json_response(content)
-            if result and isinstance(result, dict) and result.get("description"):
-                return {
-                    "description": result["description"].strip(),
-                    "priority": result.get("priority", "Medium"),
-                }
-            print(f"generate_backlog_from_prompt attempt {attempt+1}: could not parse valid result from: {content[:300]}", file=sys.stderr)
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-        except Exception as e:
-            print(f"generate_backlog_from_prompt attempt {attempt+1} error: {e}", file=sys.stderr)
-            if attempt < 2:
-                time.sleep(2 ** attempt)
+            except Exception as e:
+                print(f"generate_backlog_from_prompt model={current_model} attempt {attempt+1} error: {e}", file=sys.stderr)
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
 
     return None
 
@@ -455,45 +511,54 @@ Items to classify:
 {chr(10).join(items_block)}"""
 
     import time
-    for attempt in range(3):
-        try:
-            resp = requests.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "http://localhost:5173",
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.0,
-                    "max_tokens": 1500,
-                },
-                timeout=60,
-            )
-            if resp.status_code != 200:
-                print(f"classify_fathom_action_items attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
+    models_to_try = [model]
+    if model != FALLBACK_MODEL:
+        models_to_try.append(FALLBACK_MODEL)
+    for current_model in models_to_try:
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "http://localhost:5173",
+                    },
+                    json={
+                        "model": current_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.0,
+                        "max_tokens": 1500,
+                    },
+                    timeout=60,
+                )
+                if resp.status_code != 200:
+                    is_429 = resp.status_code == 429
+                    is_402 = resp.status_code == 402
+                    print(f"classify_fathom_action_items model={current_model} attempt {attempt+1} failed: {resp.status_code}", file=sys.stderr)
+                    if is_402:
+                        break
+                    if attempt < 2:
+                        delay = 10 if is_429 else (2 ** attempt)
+                        time.sleep(delay)
+                    continue
+                content = resp.json()["choices"][0]["message"]["content"]
+                result = _parse_json_response(content)
+                if result and isinstance(result, dict):
+                    # Normalize keys to string ints
+                    normalized = {}
+                    for k, v in result.items():
+                        if isinstance(v, str) and v in ('task', 'backlog', 'discard'):
+                            normalized[str(k)] = v
+                    if normalized:
+                        return normalized
+                print(f"classify_fathom_action_items model={current_model} attempt {attempt+1}: bad parse", file=sys.stderr)
                 if attempt < 2:
                     time.sleep(2 ** attempt)
-                continue
-            content = resp.json()["choices"][0]["message"]["content"]
-            result = _parse_json_response(content)
-            if result and isinstance(result, dict):
-                # Normalize keys to string ints
-                normalized = {}
-                for k, v in result.items():
-                    if isinstance(v, str) and v in ('task', 'backlog', 'discard'):
-                        normalized[str(k)] = v
-                if normalized:
-                    return normalized
-            print(f"classify_fathom_action_items attempt {attempt+1}: bad parse", file=sys.stderr)
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-        except Exception as e:
-            print(f"classify_fathom_action_items attempt {attempt+1} error: {e}", file=sys.stderr)
-            if attempt < 2:
-                time.sleep(2 ** attempt)
+            except Exception as e:
+                print(f"classify_fathom_action_items model={current_model} attempt {attempt+1} error: {e}", file=sys.stderr)
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
 
     return {}
 
