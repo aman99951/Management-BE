@@ -315,15 +315,18 @@ class MeetingViewSet(viewsets.ModelViewSet):
     def batch_generate_tasks(self, request):
         """Auto-generate AI tasks for all meetings that have transcripts/summaries but no tasks yet."""
         total = 0
+        total_backlogs = 0
         total_emails_sent = 0
         total_emails_failed = 0
         for meeting in Meeting.objects.all():
             result = _auto_generate_tasks_for_meeting(meeting)
             total += result['task_count']
+            total_backlogs += result.get('backlog_count', 0)
             total_emails_sent += result['email_status']['sent_count']
             total_emails_failed += result['email_status']['failed_count']
         return Response({
             'total_generated': total,
+            'total_backlogs': total_backlogs,
             'emails_sent': total_emails_sent,
             'emails_failed': total_emails_failed,
         })
@@ -589,7 +592,7 @@ class BacklogItemViewSet(viewsets.ModelViewSet):
         elif tab == 'converted':
             queryset = queryset.filter(created_task__isnull=False)
 
-        queryset = queryset.order_by('-created_at')
+        queryset = queryset.order_by('-meeting_date', '-created_at')
 
         page = self.paginate_queryset(queryset)
         if page is not None:
@@ -1085,10 +1088,77 @@ def _auto_generate_tasks_for_meeting(meeting):
                             if result.get('details'):
                                 all_email_details.extend(result['details'])
 
+    # Phase 3: Auto-generate backlog items (enhancement ideas) from the meeting
+    backlog_created = 0
+    if meeting.transcript and settings.OPENROUTER_API_KEY:
+        try:
+            transcript_text_p3 = ''
+            if isinstance(meeting.transcript, list):
+                for entry in meeting.transcript:
+                    speaker = entry.get('speaker', {}).get('display_name', 'Unknown') if isinstance(entry, dict) else 'Unknown'
+                    text = entry.get('text', '') if isinstance(entry, dict) else str(entry)
+                    transcript_text_p3 += f"{speaker}: {text}\n"
+            elif isinstance(meeting.transcript, str):
+                transcript_text_p3 = meeting.transcript
+
+            if transcript_text_p3:
+                meeting_content = transcript_text_p3
+                if meeting.summary:
+                    meeting_content = f"--- AI Summary ---\n{meeting.summary}\n\n--- Transcript ---\n{transcript_text_p3}"
+                from .ai_service import analyze_meeting_for_enhancements
+                enhancements = analyze_meeting_for_enhancements(meeting_content, meeting.title)
+                if enhancements and isinstance(enhancements, list):
+                    approved = set(
+                        BacklogItem.objects.filter(source='auto-capture')
+                        .exclude(source_ref__exact='')
+                        .values_list('source_ref', flat=True)
+                    )
+                    dismissed = set(
+                        DismissedSuggestion.objects.values_list('content_hash', flat=True)
+                    )
+                    m_date = meeting.recorded_at or meeting.created_at
+                    for item in enhancements:
+                        c_hash = hashlib.md5(
+                            f'{meeting.id}:{item.get("title", "")}:{item.get("proposed_enhancement", "")}'.encode()
+                        ).hexdigest()
+                        if c_hash in approved or c_hash in dismissed:
+                            continue
+                        desc_parts = []
+                        if item.get('title'):
+                            desc_parts.append(f'# {item["title"]}')
+                        if item.get('background'):
+                            desc_parts.append(f'\n**Background / Problem Statement:**\n{item["background"]}')
+                        if item.get('proposed_enhancement'):
+                            desc_parts.append(f'\n**Proposed Enhancement:**\n{item["proposed_enhancement"]}')
+                        if item.get('expected_benefits'):
+                            desc_parts.append(f'\n**Expected Benefits:**\n{item["expected_benefits"]}')
+                        if item.get('stakeholders'):
+                            desc_parts.append(f'\n**Stakeholders:** {item["stakeholders"]}')
+                        if item.get('source_of_idea'):
+                            desc_parts.append(f'\n**Source:** {item["source_of_idea"]}')
+                        if meeting.title:
+                            desc_parts.append(f'\n**From Meeting:** {meeting.title}')
+                        priority = item.get('priority', 'Medium')
+                        if priority not in dict(BacklogItem.PRIORITY_CHOICES):
+                            priority = 'Medium'
+                        BacklogItem.objects.create(
+                            description='\n'.join(desc_parts) or item.get('title', ''),
+                            priority=priority,
+                            status='Future Consideration',
+                            source='auto-capture',
+                            source_ref=c_hash,
+                            meeting_date=m_date,
+                        )
+                        backlog_created += 1
+        except Exception as e:
+            print(f"_auto_generate_tasks_for_meeting: backlog generation failed for meeting {meeting.id}: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+
     all_tasks = fathom_created + ai_created
 
     return {
         'task_count': len(all_tasks),
+        'backlog_count': backlog_created,
         'email_status': {
             'sent_count': sum(1 for d in all_email_details if d.get('sent')),
             'failed_count': sum(1 for d in all_email_details if not d.get('sent')),
