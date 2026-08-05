@@ -7,20 +7,115 @@ FATHOM_API_BASE = "https://api.fathom.ai/external/v1"
 def get_config():
     return FathomConfig.objects.first()
 
+def _normalize_key_entries(raw):
+    """Normalize api_keys storage to a list of {key, added_by, added_at} dicts.
+
+    Accepts plain key strings (legacy) or entry dicts.
+    """
+    entries = []
+    for item in raw or []:
+        if isinstance(item, dict):
+            key = str(item.get("key") or "").strip()
+            if not key:
+                continue
+            entries.append({
+                "key": key,
+                "added_by": str(item.get("added_by") or "").strip(),
+                "added_at": str(item.get("added_at") or "").strip(),
+            })
+        else:
+            key = str(item or "").strip()
+            if key:
+                entries.append({"key": key, "added_by": "", "added_at": ""})
+    return entries
+
+def get_api_key_entries(config=None):
+    """Return all configured Fathom accounts as {key, added_by, added_at} dicts.
+
+    Includes the legacy api_key as the first entry when it isn't already in api_keys.
+    """
+    config = config or get_config()
+    if not config:
+        return []
+    entries = _normalize_key_entries(config.api_keys)
+    seen = {e["key"] for e in entries}
+    if config.api_key and config.api_key not in seen:
+        entries.insert(0, {"key": config.api_key, "added_by": "", "added_at": ""})
+    return entries
+
+def get_api_key_list(config=None):
+    """Return every configured Fathom API key (legacy api_key + api_keys list), deduplicated."""
+    return [e["key"] for e in get_api_key_entries(config)]
+
+def mask_key(key):
+    """Mask a key for display: show first 6 + last 4 chars."""
+    if not key:
+        return ''
+    if len(key) <= 10:
+        return key
+    return f"{key[:6]}...{key[-4:]}"
+
+def resolve_masked_keys(requested, stored_entries):
+    """Map masked keys from the client back to the real stored keys.
+
+    The Settings page shows masked keys; when it saves the whole list back we need
+    to restore the original values. Items without '...' are treated as raw new keys.
+    """
+    stored_by_mask = {}
+    for e in stored_entries:
+        stored_by_mask.setdefault(mask_key(e["key"]), e)
+    resolved = []
+    for item in requested:
+        if isinstance(item, dict):
+            key = str(item.get("key") or "").strip()
+            added_by = str(item.get("added_by") or "").strip()
+            added_at = str(item.get("added_at") or "").strip()
+        else:
+            key = str(item or "").strip()
+            added_by = ""
+            added_at = ""
+        if not key:
+            continue
+        if "..." in key and key in stored_by_mask:
+            e = stored_by_mask[key]
+            resolved.append({
+                "key": e["key"],
+                "added_by": added_by or e.get("added_by") or "",
+                "added_at": added_at or e.get("added_at") or "",
+            })
+        else:
+            resolved.append({"key": key, "added_by": added_by, "added_at": added_at})
+    # dedupe by key, keep first occurrence
+    seen = set()
+    unique = []
+    for e in resolved:
+        if e["key"] not in seen:
+            seen.add(e["key"])
+            unique.append(e)
+    return unique
+
 def fathom_headers(user=None):
     if user:
         token = get_user_fathom_token(user)
         if token:
             return {"Authorization": f"Bearer {token}"}
-    config = get_config()
-    if not config or not config.api_key:
+    keys = get_api_key_list()
+    if not keys:
         return None
-    return {"X-Api-Key": config.api_key}
+    return {"X-Api-Key": keys[0]}
+
+def all_fathom_headers():
+    """Yield header dicts for every configured Fathom account API key."""
+    for key in get_api_key_list():
+        if key:
+            yield {"X-Api-Key": key}
 
 def fetch_meetings(cursor=None):
-    headers = fathom_headers()
-    if not headers:
-        return None
+    """Fetch meetings across every configured Fathom account, deduplicated by recording_id.
+
+    Whichever account's notetaker stayed in the meeting records it, so a sync across
+    all keys always finds the complete recording.
+    """
     params = {
         "include_summary": "true",
         "include_action_items": "true",
@@ -28,19 +123,28 @@ def fetch_meetings(cursor=None):
     }
     if cursor:
         params["cursor"] = cursor
-    resp = requests.get(f"{FATHOM_API_BASE}/meetings", headers=headers, params=params)
-    if resp.status_code != 200:
-        return None
-    return resp.json()
+    items = []
+    seen_ids = set()
+    for headers in all_fathom_headers():
+        resp = requests.get(f"{FATHOM_API_BASE}/meetings", headers=headers, params=params)
+        if resp.status_code != 200:
+            continue
+        data = resp.json()
+        for item in data.get("items", []):
+            rid = item.get("recording_id")
+            if rid and rid in seen_ids:
+                continue
+            if rid:
+                seen_ids.add(rid)
+            items.append(item)
+    return {"items": items}
 
 def fetch_transcript(recording_id):
-    headers = fathom_headers()
-    if not headers:
-        return None
-    resp = requests.get(f"{FATHOM_API_BASE}/recordings/{recording_id}/transcript", headers=headers)
-    if resp.status_code != 200:
-        return None
-    return resp.json()
+    for headers in all_fathom_headers():
+        resp = requests.get(f"{FATHOM_API_BASE}/recordings/{recording_id}/transcript", headers=headers)
+        if resp.status_code == 200:
+            return resp.json()
+    return None
 
 def find_fathom_recording(meeting):
     headers = fathom_headers()
@@ -92,18 +196,20 @@ def fetch_meetings_from_fathom_by_title(title):
     return None
 
 def fetch_meeting_by_id(recording_id):
-    """Fetch a single meeting's full details (transcript + summary) from Fathom API."""
-    headers = fathom_headers()
-    if not headers:
-        return None
-    resp = requests.get(f"{FATHOM_API_BASE}/meetings/{recording_id}", headers=headers, params={
+    """Fetch a single meeting's full details (transcript + summary) from Fathom API.
+
+    Tries every configured account so a recording made by any Fathom notetaker is found.
+    """
+    params = {
         "include_summary": "true",
         "include_action_items": "true",
         "include_transcript": "true",
-    })
-    if resp.status_code != 200:
-        return None
-    return resp.json()
+    }
+    for headers in all_fathom_headers():
+        resp = requests.get(f"{FATHOM_API_BASE}/meetings/{recording_id}", headers=headers, params=params)
+        if resp.status_code == 200:
+            return resp.json()
+    return None
 
 
 def sync_meetings():

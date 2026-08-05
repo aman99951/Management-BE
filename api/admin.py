@@ -45,10 +45,15 @@ class FathomConfigAdmin(admin.ModelAdmin):
     readonly_fields = ['created_at', 'updated_at']
 
     def key_preview(self, obj):
-        if obj.api_key and len(obj.api_key) > 8:
-            return obj.api_key[:8] + '...' + obj.api_key[-4:]
-        return obj.api_key
-    key_preview.short_description = 'API Key'
+        keys = [obj.api_key] + list(obj.api_keys or [])
+        keys = [k for k in keys if k]
+        if not keys:
+            return '(no keys)'
+        first = keys[0]
+        masked = (first[:8] + '...' + first[-4:]) if len(first) > 8 else first
+        extra = f' (+{len(keys) - 1} more)' if len(keys) > 1 else ''
+        return masked + extra
+    key_preview.short_description = 'API Key(s)'
 
 
 @admin.register(FathomUserToken)

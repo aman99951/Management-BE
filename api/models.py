@@ -74,7 +74,8 @@ class Comment(models.Model):
         return f"{self.author.name if self.author else '?'}: {self.text[:50]}"
 
 class FathomConfig(models.Model):
-    api_key = models.CharField(max_length=500)
+    api_key = models.CharField(max_length=500, blank=True)
+    api_keys = models.JSONField(default=list, blank=True, help_text='All Fathom account API keys. Sync searches every account, so anyone who stays in the meeting gets picked up.')
     webhook_secret = models.CharField(max_length=500, blank=True)
     email_notifications_enabled = models.BooleanField(default=True, help_text='Master toggle for all email notifications (task assignments, meeting invites, etc.)')
     created_at = models.DateTimeField(auto_now_add=True)

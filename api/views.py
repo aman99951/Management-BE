@@ -287,7 +287,7 @@ def _notify_task_assignees(tasks):
         dict with 'sent_count', 'failed_count', and 'details' list.
     """
     return send_batch_tasks_email(tasks)
-from .services import sync_meetings, process_webhook_payload, get_config, get_user_fathom_token, fathom_headers, FATHOM_API_BASE, fetch_transcript, fetch_meeting_by_id
+from .services import sync_meetings, process_webhook_payload, get_config, get_user_fathom_token, fathom_headers, FATHOM_API_BASE, fetch_transcript, fetch_meeting_by_id, get_api_key_list, mask_key, all_fathom_headers, get_api_key_entries, resolve_masked_keys
 from .google_calendar import (create_meet_event, list_upcoming_events, sync_calendar_events, get_google_calendar_auth_url, get_google_calendar_credentials, resolve_calendar_state)
 from urllib.parse import urlencode
 
@@ -896,25 +896,71 @@ def dismiss_suggestion(request):
         return Response({'error': str(e)}, status=500)
 
 
+def _fathom_uploader_name(request):
+    user = request.user
+    if user and user.is_authenticated:
+        return user.get_full_name() or user.email or user.username
+    return 'Unknown'
+
+def _fathom_keys_response(config):
+    entries = get_api_key_entries(config)
+    return {
+        'configured': True,
+        'email_notifications_enabled': config.email_notifications_enabled,
+        'api_keys': [
+            {
+                'key': mask_key(e['key']),
+                'added_by': e.get('added_by') or '',
+                'added_at': e.get('added_at') or '',
+            }
+            for e in entries
+        ],
+        'key_count': len(entries),
+    }
+
+
 @api_view(['GET', 'POST'])
 @csrf_exempt
 def fathom_config_view(request):
     if request.method == 'GET':
         config = get_config()
         if not config:
-            return JsonResponse({'configured': False, 'email_notifications_enabled': True})
-        return JsonResponse({
-            'configured': True,
-            'email_notifications_enabled': config.email_notifications_enabled,
-        })
+            return JsonResponse({'configured': False, 'email_notifications_enabled': True, 'api_keys': [], 'key_count': 0})
+        return JsonResponse(_fathom_keys_response(config))
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
     config = get_config()
 
+    # Multi-account key management: api_keys replaces the list, api_key appends one.
+    # Every key is stored as {key, added_by, added_at}; masked keys sent back from the
+    # Settings page are mapped to the real stored values.
+    if 'api_keys' in data or 'api_key' in data:
+        uploader = _fathom_uploader_name(request)
+        now_iso = timezone.now().isoformat()
+        entries = resolve_masked_keys(data.get('api_keys') or [], get_api_key_entries(config)) if 'api_keys' in data else get_api_key_entries(config)
+        for e in entries:
+            if not e.get('added_at'):
+                e['added_at'] = now_iso
+        if 'api_key' in data:
+            new_key = str(data.get('api_key') or '').strip()
+            if new_key and new_key not in [e['key'] for e in entries]:
+                entries.append({'key': new_key, 'added_by': uploader, 'added_at': now_iso})
+        if not config:
+            config = FathomConfig.objects.create(api_key=entries[0]['key'] if entries else '', api_keys=entries)
+        else:
+            config.api_keys = entries
+            config.api_key = entries[0]['key'] if entries else ('' if 'api_keys' in data else config.api_key)
+            if 'webhook_secret' in data:
+                config.webhook_secret = str(data.get('webhook_secret') or '')
+            if 'email_notifications_enabled' in data:
+                config.email_notifications_enabled = bool(data.get('email_notifications_enabled'))
+            config.save()
+        return JsonResponse(_fathom_keys_response(config))
+
     # Handle single-field updates (e.g. just toggling email)
-    partial_update = 'api_key' not in data and 'webhook_secret' not in data
+    partial_update = 'webhook_secret' not in data
     if config and partial_update:
         for key, val in data.items():
             if hasattr(config, key):
@@ -1514,24 +1560,23 @@ def fathom_recording_detail(request, meeting_id):
         return Response({'error': 'Meeting not found'}, status=404)
     if not meeting.fathom_recording_id:
         return Response({'error': 'No Fathom recording associated'}, status=400)
-    headers = fathom_headers(request.user)
-    if not headers:
+    header_sets = [h for h in ([fathom_headers(request.user)] if fathom_headers(request.user) else []) + list(all_fathom_headers())]
+    if not header_sets:
         return Response({'error': 'Configure Fathom API key in Settings first', 'needs_fathom_auth': True}, status=400)
-    resp = http_requests.get(
-        f"{FATHOM_API_BASE}/meetings/{meeting.fathom_recording_id}",
-        headers=headers
-    )
-    if resp.status_code == 404:
+    data = None
+    for headers in header_sets:
+        resp = http_requests.get(
+            f"{FATHOM_API_BASE}/meetings/{meeting.fathom_recording_id}",
+            headers=headers
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            break
+    if data is None:
         return Response({
             'recording_url': meeting.meeting_url,
             'share_url': meeting.share_url or None,
         })
-    if resp.status_code != 200:
-        return Response({
-            'recording_url': meeting.meeting_url,
-            'share_url': meeting.share_url or None,
-        })
-    data = resp.json()
     share_url = data.get('share_url') or meeting.share_url or None
     return Response({
         'recording_url': data.get('url', meeting.meeting_url),
