@@ -1,8 +1,47 @@
 import requests
+from datetime import datetime, timezone
 from django.conf import settings
+from django.utils import timezone as django_timezone
 from .models import FathomConfig, FathomUserToken, Meeting, Task, Employee
 
 FATHOM_API_BASE = "https://api.fathom.ai/external/v1"
+
+
+def coerce_recording_id(value):
+    """Coerce a Fathom recording_id (int or numeric string) to an int, else None."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_fathom_datetime(value):
+    """Parse a Fathom timestamp that may be ISO-8601, MySQL-style, a unix epoch, or garbage."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace('Z', '+00:00'))
+    except ValueError:
+        pass
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+        try:
+            naive = datetime.strptime(s, fmt)
+            return naive.replace(tzinfo=django_timezone.get_current_timezone())
+        except ValueError:
+            continue
+    return None
 
 def get_config():
     return FathomConfig.objects.first()
@@ -168,7 +207,7 @@ def find_fathom_recording(meeting):
                     "title": item.get("meeting_title") or item.get("title", meeting.title),
                     "meeting_url": item.get("url", meeting.meeting_url),
                     "share_url": item.get("share_url", ""),
-                    "recorded_at": item.get("recording_start_time"),
+                    "recorded_at": parse_fathom_datetime(item.get("recording_start_time")),
                     "summary": (
                         item.get("default_summary", {}).get("markdown_formatted", "")
                         if item.get("default_summary") else ""
@@ -230,7 +269,7 @@ def sync_meetings():
                 "title": item.get("meeting_title") or item.get("title", ""),
                 "meeting_url": item.get("url", ""),
                 "share_url": item.get("share_url", ""),
-                "recorded_at": item.get("recording_start_time"),
+                "recorded_at": parse_fathom_datetime(item.get("recording_start_time")),
                 "summary": (
                     item.get("default_summary", {}).get("markdown_formatted", "")
                     if item.get("default_summary") else ""
@@ -303,30 +342,46 @@ def _extract_tasks_from_summary(summary_text, meeting):
         )
 
 def process_webhook_payload(payload):
-    recording_id = payload.get("recording_id")
-    title = payload.get("meeting_title") or payload.get("title", "Untitled Meeting")
-    meeting_url = payload.get("url", "")
-    share_url = payload.get("share_url", "")
-    recorded_at = payload.get("recording_start_time")
+    """Create or update a Meeting from a Fathom webhook payload, tolerantly.
+
+    Never rejects the payload because a field is missing/malformed — returns
+    (None, False) when there is no usable recording_id, otherwise saves the
+    meeting with whatever fields are present. Empty transcript/summary values
+    are NOT written so a retry (which may arrive before Fathom finishes
+    processing) can't wipe previously-synced data.
+    """
+    payload = payload or {}
+    recording_id = coerce_recording_id(payload.get("recording_id"))
+    if not recording_id:
+        return None, False
+
     summary_data = payload.get("default_summary")
-    summary = summary_data.get("markdown_formatted", "") if summary_data else ""
-    action_items = payload.get("action_items", [])
-    transcript = payload.get("transcript")
+    if isinstance(summary_data, dict):
+        summary = summary_data.get("markdown_formatted") or summary_data.get("text") or ""
+    elif isinstance(summary_data, str):
+        summary = summary_data
+    else:
+        summary = ""
+
+    defaults = {}
+    non_empty_fields = {
+        "title": payload.get("meeting_title") or payload.get("title") or "Untitled Meeting",
+        "meeting_url": payload.get("url") or "",
+        "share_url": payload.get("share_url") or "",
+        "recorded_at": parse_fathom_datetime(payload.get("recording_start_time")),
+        "summary": summary,
+        "raw_summary": summary_data,
+        "raw_action_items": payload.get("action_items"),
+        "transcript": payload.get("transcript"),
+    }
+    for key, value in non_empty_fields.items():
+        if value not in (None, ""):
+            defaults[key] = value
 
     meeting, created = Meeting.objects.update_or_create(
         fathom_recording_id=recording_id,
-        defaults={
-            "title": title,
-            "meeting_url": meeting_url,
-            "share_url": share_url,
-            "recorded_at": recorded_at,
-            "summary": summary,
-            "raw_summary": summary_data,
-            "raw_action_items": action_items,
-            "transcript": transcript,
-        },
+        defaults=defaults,
     )
-
     return meeting, created
 
 def get_user_fathom_token(user):

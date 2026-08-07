@@ -103,12 +103,3 @@ class BacklogItemSerializer(serializers.ModelSerializer):
         model = BacklogItem
         fields = '__all__'
 
-class FathomWebhookSerializer(serializers.Serializer):
-    recording_id = serializers.IntegerField()
-    title = serializers.CharField(required=False, default='')
-    meeting_title = serializers.CharField(required=False, default='')
-    url = serializers.URLField(required=False, default='')
-    default_summary = serializers.JSONField(required=False, default=None)
-    action_items = serializers.JSONField(required=False, default=None)
-    recording_start_time = serializers.DateTimeField(required=False, default=None)
-    transcript = serializers.JSONField(required=False, default=None)

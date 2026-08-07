@@ -24,7 +24,7 @@ from django.db.models.functions import TruncDay
 from django.utils import timezone
 import requests as http_requests
 from .models import Employee, Meeting, Task, FathomConfig, Comment, GoogleCalendarToken, ScheduledMeeting, Notification, BacklogItem, DismissedSuggestion
-from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, FathomWebhookSerializer, CommentSerializer, GoogleCalendarTokenSerializer, ScheduledMeetingSerializer, NotificationSerializer, BacklogItemSerializer
+from .serializers import EmployeeSerializer, MeetingSerializer, TaskSerializer, FathomConfigSerializer, CommentSerializer, GoogleCalendarTokenSerializer, ScheduledMeetingSerializer, NotificationSerializer, BacklogItemSerializer
 from .email_service import send_action_items_to_assignees, send_meeting_invitation, send_meeting_created_notification, send_task_assignment_email, send_batch_tasks_email
 
 
@@ -1244,12 +1244,22 @@ def fathom_sync_view(request):
 
 @api_view(['POST'])
 def fathom_webhook_view(request):
-    serializer = FathomWebhookSerializer(data=request.data)
-    if not serializer.is_valid():
-        return Response(serializer.errors, status=400)
-    meeting, created = process_webhook_payload(serializer.validated_data)
+    payload = request.data if isinstance(request.data, dict) else {}
+    try:
+        meeting, created = process_webhook_payload(payload)
+    except Exception as e:
+        print(f"fathom webhook: failed to process payload: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return Response({'status': 'error', 'detail': str(e)}, status=200)
+    if meeting is None:
+        return Response({'status': 'ignored', 'reason': 'no recording_id'}, status=200)
     # Auto-generate tasks even if meeting already existed (webhook retry may have more data)
-    result = _auto_generate_tasks_for_meeting(meeting)
+    result = {'task_count': 0, 'email_status': {'sent_count': 0, 'failed_count': 0, 'details': []}}
+    try:
+        result = _auto_generate_tasks_for_meeting(meeting)
+    except Exception as e:
+        print(f"fathom webhook: task generation failed for meeting {meeting.id}: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
     return Response({
         'meeting_id': meeting.id,
         'created': created,
@@ -1257,7 +1267,7 @@ def fathom_webhook_view(request):
         'emails_sent': result['email_status']['sent_count'],
         'emails_failed': result['email_status']['failed_count'],
         'email_details': result['email_status']['details'],
-    }, status=201)
+    }, status=200)
 
 @api_view(['GET'])
 def dashboard_stats(request):

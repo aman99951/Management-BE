@@ -8,7 +8,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 MAX_INPUT_CHARS = 30000
 CHUNK_SIZE = 10000  # chars per chunk for transcript processing
-FALLBACK_MODEL = "google/gemma-4-31b-it:free"  # fallback when primary model is rate-limited or unavailable
+FALLBACK_MODEL = "nvidia/nemotron-nano-9b-v2:free"  # fallback when primary model is rate-limited or unavailable
 
 NAME_MAP_PROMPT = """
 Employee name mapping (use these ALWAYS):
@@ -139,6 +139,10 @@ Meeting: {meeting_title}
                         time.sleep(2 ** attempt)
                 except requests.RequestException as e:
                     print(f"  Chunk {i+1} model={current_model} exception: {e}", file=sys.stderr)
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                except Exception as e:
+                    print(f"  Chunk {i+1} model={current_model} parse error: {e}", file=sys.stderr)
                     if attempt < 2:
                         time.sleep(2 ** attempt)
 
