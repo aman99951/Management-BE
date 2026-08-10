@@ -313,22 +313,18 @@ class MeetingViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def batch_generate_tasks(self, request):
-        """Auto-generate AI tasks for all meetings that have transcripts/summaries but no tasks yet."""
-        total = 0
-        total_backlogs = 0
-        total_emails_sent = 0
-        total_emails_failed = 0
-        for meeting in Meeting.objects.all():
-            result = _auto_generate_tasks_for_meeting(meeting)
-            total += result['task_count']
-            total_backlogs += result.get('backlog_count', 0)
-            total_emails_sent += result['email_status']['sent_count']
-            total_emails_failed += result['email_status']['failed_count']
+        """Queue AI task generation for ALL meetings.
+
+        Runs in the background worker; poll GET /api/tasks/generation-status/?batch=1.
+        """
+        from .jobs import enqueue_task_generation
+        job, is_new = enqueue_task_generation(batch=True)
         return Response({
-            'total_generated': total,
-            'total_backlogs': total_backlogs,
-            'emails_sent': total_emails_sent,
-            'emails_failed': total_emails_failed,
+            'queued': True,
+            'job_id': job.id,
+            'new': is_new,
+            'status': job.status,
+            'message': 'Task generation queued — it runs in the background.',
         })
 
     @action(detail=True, methods=['post'])
@@ -342,122 +338,20 @@ class MeetingViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def generate_tasks(self, request, pk=None):
+        """Queue AI task generation for this meeting.
+
+        The actual (slow, multi-minute) generation runs in the background worker
+        (`python manage.py task_worker`) so this request returns immediately.
+        Poll `GET /api/tasks/generation-status/?meeting_id=<id>` for the result.
+        """
         meeting = self.get_object()
-
-        # Remove existing auto-generated tasks so we fully regenerate
-        Task.objects.filter(meeting=meeting, source__in=['fathom', 'ai']).delete()
-
-        fathom_tasks = []
-        ai_created_tasks = []
-        meeting_date = meeting.recorded_at or meeting.created_at
-
-        # Phase 1: Create tasks directly from Fathom raw_action_items (authoritative)
-        if meeting.raw_action_items:
-            fathom_tasks = _create_tasks_from_fathom_action_items(meeting)
-            _enrich_fathom_tasks(meeting, fathom_tasks)
-
-        # Phase 2: AI extraction to catch tasks Fathom may have missed.
-        # Runs even when Fathom items exist (for partial capture), deduplicated against Fathom tasks.
-        if meeting.transcript and settings.OPENROUTER_API_KEY:
-            transcript_text = ''
-            for entry in meeting.transcript:
-                speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
-                text = entry.get('text', '')
-                transcript_text += f"{speaker}: {text}\n"
-
-            if transcript_text:
-                input_text = f"Meeting Title: {meeting.title}\n\nTranscript:\n{transcript_text}\n"
-
-                # Append already-captured Fathom tasks so AI knows not to re-create them
-                if fathom_tasks:
-                    input_text += "\n\nNOTE - The following tasks were ALREADY CAPTURED from this meeting. DO NOT create duplicates of them:\n"
-                    for t in fathom_tasks:
-                        aname = t.assigned_to.name if t.assigned_to else 'Unassigned'
-                        input_text += f"- {t.title} (assignee: {aname})\n"
-
-                from .ai_service import generate_tasks_from_summary
-                ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
-                if ai_tasks and isinstance(ai_tasks, list):
-                    meeting_date = meeting.recorded_at or meeting.created_at
-                    existing_descriptions = None
-                    existing_titles_by_assignee = None
-                    if fathom_tasks:
-                        existing_descriptions = set()
-                        existing_titles_by_assignee = {}
-                        for t in fathom_tasks:
-                            existing_descriptions.add(t.description.lower().strip()[:80])
-                            emp_key = t.assigned_to.id if t.assigned_to else None
-                            existing_titles_by_assignee.setdefault(emp_key, set()).add(t.title.lower().strip()[:40])
-                    ai_created_tasks = _create_tasks_from_ai_list(
-                        ai_tasks, meeting, meeting_date,
-                        existing_descriptions=existing_descriptions,
-                        existing_titles_by_assignee=existing_titles_by_assignee,
-                    )
-
-        all_created = fathom_tasks + ai_created_tasks
-        email_result = _notify_task_assignees(all_created)
-
-        # Phase 3: Auto-generate backlog items (enhancement ideas) from the same meeting
-        backlog_created = 0
-        if meeting.transcript and settings.OPENROUTER_API_KEY and transcript_text:
-            try:
-                # Build full meeting content: summary + transcript
-                meeting_content = transcript_text
-                if meeting.summary:
-                    meeting_content = f"--- AI Summary ---\n{meeting.summary}\n\n--- Transcript ---\n{transcript_text}"
-                from .ai_service import analyze_meeting_for_enhancements
-                enhancements = analyze_meeting_for_enhancements(meeting_content, meeting.title)
-                if enhancements and isinstance(enhancements, list):
-                    # Pre-load existing hashes for dedup
-                    approved = set(
-                        BacklogItem.objects.filter(source='auto-capture')
-                        .exclude(source_ref__exact='')
-                        .values_list('source_ref', flat=True)
-                    )
-                    dismissed = set(
-                        DismissedSuggestion.objects.values_list('content_hash', flat=True)
-                    )
-                    meeting_date = meeting.recorded_at or meeting.created_at
-                    for item in enhancements:
-                        c_hash = hashlib.md5(
-                            f'{meeting.id}:{item.get("title", "")}:{item.get("proposed_enhancement", "")}'.encode()
-                        ).hexdigest()
-                        if c_hash in approved or c_hash in dismissed:
-                            continue
-                        desc_parts = []
-                        if item.get('title'): desc_parts.append(f'# {item["title"]}')
-                        if item.get('background'): desc_parts.append(f'\n**Background / Problem Statement:**\n{item["background"]}')
-                        if item.get('proposed_enhancement'): desc_parts.append(f'\n**Proposed Enhancement:**\n{item["proposed_enhancement"]}')
-                        if item.get('expected_benefits'): desc_parts.append(f'\n**Expected Benefits:**\n{item["expected_benefits"]}')
-                        if item.get('stakeholders'): desc_parts.append(f'\n**Stakeholders:** {item["stakeholders"]}')
-                        if item.get('source_of_idea'): desc_parts.append(f'\n**Source:** {item["source_of_idea"]}')
-                        if meeting.title: desc_parts.append(f'\n**From Meeting:** {meeting.title}')
-                        priority = item.get('priority', 'Medium')
-                        if priority not in dict(BacklogItem.PRIORITY_CHOICES):
-                            priority = 'Medium'
-                        BacklogItem.objects.create(
-                            description='\n'.join(desc_parts) or item.get('title', ''),
-                            priority=priority,
-                            status='Future Consideration',
-                            source='auto-capture',
-                            source_ref=c_hash,
-                            meeting_date=meeting_date,
-                        )
-                        backlog_created += 1
-            except Exception as e:
-                print(f"generate_tasks: backlog generation failed for meeting {meeting.id}: {e}", file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
-
-        from .serializers import TaskSerializer
+        from .jobs import enqueue_task_generation
+        job, is_new = enqueue_task_generation(meeting=meeting, force=True)
         return Response({
-            'status': 'created',
-            'fathom_task_count': len(fathom_tasks),
-            'ai_task_count': len(ai_created_tasks),
-            'tasks': TaskSerializer(all_created, many=True).data,
-            'backlog_items_created': backlog_created,
-            'emails_sent': email_result['sent_count'],
-            'emails_failed': email_result['failed_count'],
-            'email_details': email_result['details'],
+            'queued': True,
+            'job_id': job.id,
+            'new': is_new,
+            'status': job.status,
         })
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -1218,24 +1112,18 @@ def _auto_generate_tasks_for_meeting(meeting):
 def fathom_sync_view(request):
     try:
         new_meetings, count = sync_meetings()
-        # Auto-generate tasks for newly synced meetings
-        auto_generated = 0
-        all_email_details = []
+        # Queue task generation for newly synced meetings (runs in background worker)
+        from .jobs import enqueue_task_generation
+        queued = 0
         for meeting in new_meetings:
-            try:
-                result = _auto_generate_tasks_for_meeting(meeting)
-                auto_generated += result['task_count']
-                if result['email_status']['details']:
-                    all_email_details.extend(result['email_status']['details'])
-            except Exception as e:
-                print(f"fathom_sync: task generation failed for meeting {meeting.id}: {e}", file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
-                continue
+            _, is_new = enqueue_task_generation(meeting=meeting)
+            if is_new:
+                queued += 1
         return JsonResponse({
             'synced': count,
-            'auto_generated_tasks': auto_generated,
-            'emails_sent': sum(1 for d in all_email_details if d['sent']),
-            'emails_failed': sum(1 for d in all_email_details if not d['sent']),
+            'queued_jobs': queued,
+            'meeting_ids': [m.id for m in new_meetings],
+            'message': f'{count} meeting(s) synced; {queued} task-generation job(s) queued.',
         })
     except Exception as e:
         print(f"fathom_sync: unexpected error: {e}", file=sys.stderr)
@@ -1244,6 +1132,21 @@ def fathom_sync_view(request):
 
 @api_view(['POST'])
 def fathom_webhook_view(request):
+    # Verify the signature IF we have registered webhooks (best-effort, backwards
+    # compatible: if no webhook is registered yet we accept the payload anyway).
+    from .models import FathomWebhook
+    from .services import verify_fathom_webhook
+    registered = FathomWebhook.objects.exclude(secret__exact='')
+    if registered.exists():
+        raw_body = request.body.decode('utf-8', errors='replace') if request.body else ''
+        ok = any(
+            verify_fathom_webhook(w.secret, request.headers, raw_body)
+            for w in registered
+        )
+        if not ok:
+            print("fathom webhook: signature verification failed", file=sys.stderr)
+            return Response({'status': 'forbidden', 'reason': 'invalid webhook signature'}, status=403)
+
     payload = request.data if isinstance(request.data, dict) else {}
     try:
         meeting, created = process_webhook_payload(payload)
@@ -1253,21 +1156,89 @@ def fathom_webhook_view(request):
         return Response({'status': 'error', 'detail': str(e)}, status=200)
     if meeting is None:
         return Response({'status': 'ignored', 'reason': 'no recording_id'}, status=200)
-    # Auto-generate tasks even if meeting already existed (webhook retry may have more data)
-    result = {'task_count': 0, 'email_status': {'sent_count': 0, 'failed_count': 0, 'details': []}}
-    try:
-        result = _auto_generate_tasks_for_meeting(meeting)
-    except Exception as e:
-        print(f"fathom webhook: task generation failed for meeting {meeting.id}: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
+
+    # Queue task generation instead of running it inline (avoids worker timeouts).
+    # Fathom retries are handled safely: enqueue returns the active job if one exists.
+    from .jobs import enqueue_task_generation
+    job, is_new = enqueue_task_generation(meeting=meeting)
     return Response({
         'meeting_id': meeting.id,
         'created': created,
-        'auto_generated_tasks': result['task_count'],
-        'emails_sent': result['email_status']['sent_count'],
-        'emails_failed': result['email_status']['failed_count'],
-        'email_details': result['email_status']['details'],
+        'queued': True,
+        'job_id': job.id,
+        'job_status': job.status,
     }, status=200)
+
+
+@api_view(['GET', 'POST'])
+def fathom_webhook_register_view(request):
+    """GET: list webhooks registered in this app (there is no Fathom list API).
+    POST: register a webhook for every configured Fathom account.
+    """
+    from .services import register_fathom_webhooks, mask_key
+    from .models import FathomWebhook
+
+    if request.method == 'GET':
+        return Response({
+            'webhooks': [
+                {
+                    'api_key': w.api_key,
+                    'masked': mask_key(w.api_key),
+                    'webhook_id': w.webhook_id,
+                    'destination_url': w.destination_url,
+                    'secret_set': bool(w.secret),
+                    'triggered_for': w.triggered_for,
+                    'registered_at': w.created_at.isoformat() if w.created_at else None,
+                }
+                for w in FathomWebhook.objects.all()
+            ],
+            'detail': 'Webhooks registered in this app.',
+        })
+
+    destination_url = (request.data.get('destination_url') or '').strip()
+    if not destination_url:
+        return Response({'error': 'destination_url is required'}, status=400)
+    results = register_fathom_webhooks(
+        destination_url,
+        triggered_for=request.data.get('triggered_for'),
+        force=bool(request.data.get('force')),
+    )
+    return Response({'results': results})
+
+
+@api_view(['GET'])
+def generation_status_view(request):
+    """Poll the status of queued AI task-generation jobs.
+
+    Query params: meeting_id=<id> for a specific meeting, or batch=1 for the
+    latest batch job. Returns queued/running/done/failed plus results.
+    """
+    from .jobs import latest_job
+    batch = request.GET.get('batch') == '1'
+    meeting = None
+    meeting_id = request.GET.get('meeting_id')
+    if meeting_id and not batch:
+        meeting = Meeting.objects.filter(id=meeting_id).first()
+        if meeting is None:
+            return Response({'status': 'not_found', 'meeting_id': meeting_id}, status=404)
+
+    job = latest_job(meeting=meeting, batch=batch)
+    if job is None:
+        return Response({'status': 'none', 'batch': batch}, status=200)
+
+    return Response({
+        'status': job.status,
+        'job_id': job.id,
+        'batch': job.batch,
+        'meeting_id': job.meeting_id,
+        'task_count': job.task_count,
+        'backlog_count': job.backlog_count,
+        'emails_sent': job.emails_sent,
+        'emails_failed': job.emails_failed,
+        'error': job.error,
+        'created_at': job.created_at.isoformat(),
+        'finished_at': job.finished_at.isoformat() if job.finished_at else None,
+    })
 
 @api_view(['GET'])
 def dashboard_stats(request):

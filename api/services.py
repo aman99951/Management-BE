@@ -2,9 +2,16 @@ import requests
 from datetime import datetime, timezone
 from django.conf import settings
 from django.utils import timezone as django_timezone
-from .models import FathomConfig, FathomUserToken, Meeting, Task, Employee
+from .models import FathomConfig, FathomUserToken, FathomWebhook, Meeting, Task, Employee
 
 FATHOM_API_BASE = "https://api.fathom.ai/external/v1"
+
+DEFAULT_WEBHOOK_TRIGGERS = [
+    "my_recordings",
+    "my_shared_with_team_recordings",
+    "shared_external_recordings",
+    "shared_team_recordings",
+]
 
 
 def coerce_recording_id(value):
@@ -148,6 +155,133 @@ def all_fathom_headers():
     for key in get_api_key_list():
         if key:
             yield {"X-Api-Key": key}
+
+
+def list_fathom_webhooks(key=None):
+    """List webhooks registered in Fathom for one key (or the first configured)."""
+    for headers in all_fathom_headers():
+        if key and headers.get("X-Api-Key") != key:
+            continue
+        try:
+            resp = requests.get(f"{FATHOM_API_BASE}/webhooks", headers=headers, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("webhooks") or data.get("items") or data.get("data") or []
+                if isinstance(items, list):
+                    return items
+        except requests.RequestException as e:
+            print(f"list_fathom_webhooks: {e}", file=__import__('sys').stderr)
+    return []
+
+
+def register_fathom_webhooks(destination_url, triggered_for=None, force=False):
+    """Register a webhook with Fathom for EVERY configured account.
+
+    Returns a list of per-key results:
+      {key, masked, status: 'created'|'exists'|'error', webhook_id, secret, detail}
+    """
+    from .models import FathomWebhook
+    triggered_for = triggered_for or DEFAULT_WEBHOOK_TRIGGERS
+    results = []
+    for key in get_api_key_list():
+        if not key:
+            continue
+        entry = {
+            "key": key,
+            "masked": mask_key(key),
+            "status": "error",
+            "webhook_id": "",
+            "secret": "",
+            "detail": "",
+        }
+        try:
+            existing = FathomWebhook.objects.filter(api_key=key).first()
+            if existing and existing.destination_url == destination_url and not force:
+                entry.update(status="exists", webhook_id=existing.webhook_id, secret=existing.secret)
+                results.append(entry)
+                continue
+
+            payload = {
+                "destination_url": destination_url,
+                "triggered_for": triggered_for,
+                "include_summary": True,
+                "include_transcript": True,
+                "include_action_items": True,
+                "include_crm_matches": False,
+            }
+            headers = {"X-Api-Key": key, "Content-Type": "application/json"}
+            resp = requests.post(f"{FATHOM_API_BASE}/webhooks", headers=headers, json=payload, timeout=30)
+            if resp.status_code in (400, 422) and set(triggered_for) != {"my_recordings", "shared_external_recordings"}:
+                # Team-plan-only triggers are rejected on non-team accounts — retry minimal set
+                payload["triggered_for"] = ["my_recordings", "shared_external_recordings"]
+                resp = requests.post(f"{FATHOM_API_BASE}/webhooks", headers=headers, json=payload, timeout=30)
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                webhook_id = data.get("id", "")
+                secret = data.get("secret", "")
+                FathomWebhook.objects.update_or_create(
+                    api_key=key,
+                    defaults={
+                        "webhook_id": webhook_id,
+                        "secret": secret,
+                        "destination_url": destination_url,
+                        "triggered_for": triggered_for,
+                    },
+                )
+                entry.update(status="created", webhook_id=webhook_id, secret=secret)
+            else:
+                entry["detail"] = f"Fathom responded {resp.status_code}: {resp.text[:200]}"
+        except Exception as e:
+            entry["detail"] = f"{type(e).__name__}: {e}"
+        results.append(entry)
+    return results
+
+
+def delete_fathom_webhook(webhook_id, key=None):
+    """Delete a webhook from Fathom. Returns (ok, message)."""
+    for headers in all_fathom_headers():
+        if key and headers.get("X-Api-Key") != key:
+            continue
+        try:
+            resp = requests.delete(f"{FATHOM_API_BASE}/webhooks/{webhook_id}", headers=headers, timeout=30)
+            if resp.status_code in (200, 204):
+                return True, "deleted"
+            return False, f"Fathom responded {resp.status_code}: {resp.text[:200]}"
+        except requests.RequestException as e:
+            return False, str(e)
+    return False, "no configured key"
+
+
+def verify_fathom_webhook(secret, headers, raw_body):
+    """Verify a Fathom webhook signature (webhook-id.webhook-timestamp.body HMAC SHA-256).
+
+    Mirrors Fathom's documented verification algorithm. Returns True/False.
+    """
+    import base64
+    import hashlib
+    import hmac
+
+    secret = (secret or "").strip()
+    if not secret:
+        return False
+    try:
+        webhook_id = headers.get("webhook-id") or ""
+        timestamp = headers.get("webhook-timestamp") or ""
+        signature_header = headers.get("webhook-signature") or ""
+        if not (webhook_id and timestamp and signature_header):
+            return False
+        signed_content = f"{webhook_id}.{timestamp}.{raw_body}".encode()
+        key_bytes = base64.b64decode(secret.removeprefix("whsec_"))
+        expected = base64.b64encode(hmac.new(key_bytes, signed_content, hashlib.sha256).digest()).decode()
+        for sig in signature_header.split(" "):
+            sig = sig.split(",", 1)[-1] if "," in sig else sig
+            if sig.startswith("v1,"):
+                sig = sig[3:]
+            if hmac.compare_digest(expected, sig):
+                return True
+    except Exception as e:
+        print(f"verify_fathom_webhook: {e}", file=__import__('sys').stderr)
+    return False
 
 def fetch_meetings(cursor=None):
     """Fetch meetings across every configured Fathom account, deduplicated by recording_id.

@@ -81,6 +81,30 @@ class FathomConfig(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+class FathomWebhook(models.Model):
+    """A webhook registered with Fathom so meetings arrive automatically.
+
+    Without a registered webhook, Fathom never POSTs new recordings to us — the
+    only way to get meetings was the manual "Sync from Fathom" button. Each
+    Fathom account (API key) needs its own webhook registration.
+    """
+    api_key = models.CharField(max_length=500)
+    webhook_id = models.CharField(max_length=100, blank=True)
+    secret = models.CharField(max_length=500, blank=True, help_text='whsec_... used to verify incoming webhook signatures')
+    destination_url = models.CharField(max_length=1000)
+    triggered_for = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['api_key'], name='unique_fathom_webhook_per_key'),
+        ]
+
+    def __str__(self):
+        return f'{self.webhook_id} -> {self.destination_url}'
+
 class FathomUserToken(models.Model):
     user = models.OneToOneField('auth.User', on_delete=models.CASCADE, related_name='fathom_token')
     access_token = models.CharField(max_length=2000)
@@ -181,6 +205,41 @@ class DismissedSuggestion(models.Model):
 
     def __str__(self):
         return f'{self.meeting.title} — {self.content_hash[:12]}...'
+
+
+class TaskGenerationJob(models.Model):
+    """A queued background job that runs AI task generation outside the HTTP request.
+
+    AI generation (OpenRouter calls for task extraction, classification, enrichment
+    and backlog analysis) can take minutes for long transcripts, so it runs in a
+    separate worker process (`python manage.py task_worker`) instead of blocking the
+    request. Requests only enqueue a job and return immediately.
+    """
+    STATUS_CHOICES = [
+        ('queued', 'Queued'),
+        ('running', 'Running'),
+        ('done', 'Done'),
+        ('failed', 'Failed'),
+    ]
+    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, null=True, blank=True, related_name='task_generation_jobs')
+    batch = models.BooleanField(default=False, help_text='True = process all meetings; meeting must be null')
+    force = models.BooleanField(default=False, help_text='Delete existing auto-generated tasks before regenerating')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='queued')
+    task_count = models.IntegerField(default=0)
+    backlog_count = models.IntegerField(default=0)
+    emails_sent = models.IntegerField(default=0)
+    emails_failed = models.IntegerField(default=0)
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        target = f'meeting {self.meeting_id}' if self.meeting_id else 'all meetings (batch)'
+        return f'Job {self.id} [{self.status}] {target}'
 
 
 class Notification(models.Model):
