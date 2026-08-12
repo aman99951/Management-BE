@@ -230,6 +230,7 @@ class TaskGenerationJob(models.Model):
     emails_sent = models.IntegerField(default=0)
     emails_failed = models.IntegerField(default=0)
     error = models.TextField(blank=True)
+    progress = models.JSONField(default=dict, blank=True, help_text='Resume state for time-budgeted background processing (completed chunk indices per phase/meeting)')
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)

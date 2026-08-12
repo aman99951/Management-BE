@@ -20,7 +20,15 @@ Employee name mapping (use these ALWAYS):
 - "Gajendran" or "MG" or "sir" -> "Gajendran Mani"
 """
 
-def generate_tasks_from_summary(transcript_text, meeting_title):
+def generate_tasks_from_summary(transcript_text, meeting_title, deadline=None, progress=None):
+    """Extract tasks from a transcript, optionally under a monotonic `deadline`.
+
+    When `progress` is provided it is mutated with the chunk indices already
+    completed (`progress['p2_chunks']`) and whether the whole pass finished
+    (`progress['p2_done']`). If `deadline` is hit mid-run the partial task list
+    is returned and `progress['p2_done']` is set to False, so a resumed run
+    only processes the remaining chunks.
+    """
     api_key = settings.OPENROUTER_API_KEY
     if not api_key:
         print("OPENROUTER_API_KEY is not set", file=sys.stderr)
@@ -80,11 +88,24 @@ Meeting: {meeting_title}
 
     all_tasks = []
     import time
+    chunks_done = set(progress.get('p2_chunks', [])) if progress else None
 
     for i, chunk in enumerate(chunks):
+        if chunks_done is not None and i in chunks_done:
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            if progress is not None:
+                progress['p2_done'] = False
+            return all_tasks
         chunk_prompt = base_prompt + f"\nTranscript (part {i+1} of {len(chunks)}):\n{chunk}"
         if note_section:
             chunk_prompt += f"\n{note_section}"
+
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            request_timeout = min(60, max(5, int(remaining - 2)))
+        else:
+            request_timeout = 60
 
         print(f"  Chunk {i+1}/{len(chunks)} ({len(chunk)} chars)", file=sys.stderr)
 
@@ -112,7 +133,7 @@ Meeting: {meeting_title}
                             "temperature": 0.0,
                             "max_tokens": 4096,
                         },
-                        timeout=60,
+                        timeout=request_timeout,
                     )
                     if resp.status_code != 200:
                         is_429 = resp.status_code == 429
@@ -133,6 +154,9 @@ Meeting: {meeting_title}
                         all_tasks.extend(result)
                         print(f"  Chunk {i+1}: {len(result)} tasks", file=sys.stderr)
                         chunk_success = True
+                        if chunks_done is not None:
+                            chunks_done.add(i)
+                            progress['p2_chunks'] = sorted(chunks_done)
                         break
                     print(f"  Chunk {i+1} attempt {attempt+1}: parse failed, raw: {content[:200]}", file=sys.stderr)
                     if attempt < 2:
@@ -148,6 +172,10 @@ Meeting: {meeting_title}
 
         if not chunk_success:
             print(f"  Chunk {i+1}: all models failed, skipping", file=sys.stderr)
+
+    if progress is not None:
+        progress['p2_done'] = True
+        progress['p2_chunks'] = sorted(chunks_done or [])
 
     if not all_tasks:
         return []
@@ -255,13 +283,16 @@ Transcript:
     return None
 
 
-def analyze_meeting_for_enhancements(meeting_text, meeting_title):
+def analyze_meeting_for_enhancements(meeting_text, meeting_title, deadline=None, progress=None):
     """
     Analyze a full meeting transcript/summary to extract structured product enhancement ideas,
     feature suggestions, process improvements, and other backlog-worthy items.
     Returns a list of dicts with: title, background, proposed_enhancement, expected_benefits,
     stakeholders, priority, source_of_idea, status.
     Uses chunking for long transcripts to avoid truncation.
+
+    `deadline` (time.monotonic()) and `progress` (dict with 'p3_chunks'/'p3_done')
+    make the chunk loop resumable for time-budgeted serverless processing.
     """
     api_key = settings.OPENROUTER_API_KEY
     if not api_key:
@@ -315,13 +346,26 @@ Return ONLY a valid JSON array of objects with the keys listed above. If no vali
 
     all_items = []
     import time
+    chunks_done = set(progress.get('p3_chunks', [])) if progress else None
 
     models_to_try = [model]
     if model != FALLBACK_MODEL:
         models_to_try.append(FALLBACK_MODEL)
 
     for i, chunk in enumerate(chunks):
+        if chunks_done is not None and i in chunks_done:
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            if progress is not None:
+                progress['p3_done'] = False
+            return all_items
         prompt = base_prompt + f"\nMeeting Title: {meeting_title}\n\nMeeting Content (part {i+1} of {len(chunks)}):\n{chunk}"
+
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            request_timeout = min(60, max(5, int(remaining - 2)))
+        else:
+            request_timeout = 30
 
         chunk_success = False
         for current_model in models_to_try:
@@ -342,7 +386,7 @@ Return ONLY a valid JSON array of objects with the keys listed above. If no vali
                             "temperature": 0.0,
                             "max_tokens": 2048,
                         },
-                        timeout=30,
+                        timeout=request_timeout,
                     )
                     if resp.status_code != 200:
                         is_429 = resp.status_code == 429
@@ -361,6 +405,9 @@ Return ONLY a valid JSON array of objects with the keys listed above. If no vali
                             if isinstance(item, dict) and item.get('title') and item.get('background'):
                                 all_items.append(item)
                         chunk_success = True
+                        if chunks_done is not None:
+                            chunks_done.add(i)
+                            progress['p3_chunks'] = sorted(chunks_done)
                         break
                     if attempt < 2:
                         time.sleep(2 ** attempt)
@@ -368,6 +415,10 @@ Return ONLY a valid JSON array of objects with the keys listed above. If no vali
                     print(f"enhancements chunk {i+1} model={current_model} error: {e}", file=sys.stderr)
                     if attempt < 2:
                         time.sleep(2 ** attempt)
+
+    if progress is not None:
+        progress['p3_done'] = True
+        progress['p3_chunks'] = sorted(chunks_done or [])
 
     # Deduplicate by title similarity across chunks
     seen_titles = set()

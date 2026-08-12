@@ -904,7 +904,7 @@ def _enrich_fathom_tasks(meeting, fathom_tasks):
             task.save(update_fields=['description'])
 
 
-def _auto_generate_tasks_for_meeting(meeting):
+def _auto_generate_tasks_for_meeting(meeting, deadline=None, progress=None):
     """Auto-generate tasks for a meeting.
 
     When Fathom raw_action_items exist: creates tasks from them (source='fathom'),
@@ -915,12 +915,31 @@ def _auto_generate_tasks_for_meeting(meeting):
 
     Skips meetings titled 'Fathom Demo'. If transcript/summary is missing but a
     fathom_recording_id exists, tries to fetch from Fathom's API first.
+
+    Serverless support: when `deadline` (a time.monotonic() deadline) and
+    `progress` (the job's per-meeting resume state dict) are provided, work is
+    split across multiple sweeps. Completed AI chunk indices are recorded in
+    `progress['<meeting_id>']` and a run that hits the deadline returns
+    done=False so the job can be re-queued and resumed. All phases are
+    idempotent, so a resumed run never duplicates tasks or backlog items.
     """
+    import time as _time
     title_lower = (meeting.title or '').lower().strip()
-    _empty_result = {'task_count': 0, 'email_status': {'sent_count': 0, 'failed_count': 0, 'details': []}}
+    _empty_result = {'task_count': 0, 'email_status': {'sent_count': 0, 'failed_count': 0, 'details': []}, 'done': True}
 
     if 'fathom demo' in title_lower:
         return _empty_result
+
+    mp = None
+    if progress is not None:
+        mp = progress.setdefault(str(meeting.id), {})
+
+    def set_done(key, value):
+        if mp is not None:
+            mp[key] = value
+
+    def deadline_hit():
+        return deadline is not None and _time.monotonic() >= deadline
 
     # If transcript/summary is missing but we have a fathom_recording_id,
     # try to fetch it from Fathom's API
@@ -960,14 +979,20 @@ def _auto_generate_tasks_for_meeting(meeting):
     # Phase 1: Create tasks DIRECTLY from Fathom raw_action_items (authoritative)
     fathom_created = []
     if meeting.raw_action_items:
-        existing_fathom_count = Task.objects.filter(meeting=meeting, source='fathom').count()
-        if existing_fathom_count == 0:
-            fathom_created = _create_tasks_from_fathom_action_items(meeting)
-            if fathom_created:
-                total_count += len(fathom_created)
-                result = send_batch_tasks_email(fathom_created)
-                if result.get('details'):
-                    all_email_details.extend(result['details'])
+        if mp is not None and mp.get('p1_done'):
+            pass
+        elif deadline_hit():
+            set_done('p1_done', False)
+        else:
+            existing_fathom_count = Task.objects.filter(meeting=meeting, source='fathom').count()
+            if existing_fathom_count == 0:
+                fathom_created = _create_tasks_from_fathom_action_items(meeting)
+                if fathom_created:
+                    total_count += len(fathom_created)
+                    result = send_batch_tasks_email(fathom_created)
+                    if result.get('details'):
+                        all_email_details.extend(result['details'])
+            set_done('p1_done', True)
 
     # Enrichment step: If Fathom tasks were created and we have a transcript,
     # enrich descriptions with AI context instead of creating duplicate AI tasks
@@ -978,59 +1003,86 @@ def _auto_generate_tasks_for_meeting(meeting):
     # Even when Fathom raw_action_items exist, it may have captured only partial tasks.
     # AI finds additional tasks from the transcript, deduplicated against Fathom tasks.
     ai_created = []
-    if not Task.objects.filter(meeting=meeting, source='ai').exists():
+
+    def _run_phase2():
+        nonlocal total_count, all_email_details, ai_created
+        set_done('p2_started', True)
+        if deadline_hit():
+            set_done('p2_done', False)
+            return
         if not meeting.transcript and not meeting.summary:
-            pass  # No transcript/summary to run AI on
+            set_done('p2_done', True)
+            return
+
+        transcript_text = ''
+        if meeting.transcript:
+            for entry in meeting.transcript:
+                speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
+                text = entry.get('text', '')
+                transcript_text += f"{speaker}: {text}\n"
+
+        if transcript_text or meeting.summary:
+            input_text = f"Meeting Title: {meeting.title}\n\n"
+            if transcript_text:
+                input_text += f"Transcript:\n{transcript_text}\n"
+            elif meeting.summary:
+                input_text += f"Summary:\n{meeting.summary}\n"
+
+            # Append already-captured tasks so AI knows not to re-create them
+            if fathom_created:
+                input_text += "\n\nNOTE - The following tasks were ALREADY CAPTURED from this meeting. DO NOT create duplicates of them:\n"
+                for t in fathom_created:
+                    aname = t.assigned_to.name if t.assigned_to else 'Unassigned'
+                    input_text += f"- {t.title} (assignee: {aname})\n"
+
+            if settings.OPENROUTER_API_KEY:
+                from .ai_service import generate_tasks_from_summary
+                ai_tasks = generate_tasks_from_summary(input_text, meeting.title, deadline=deadline, progress=mp)
+                if ai_tasks and isinstance(ai_tasks, list):
+                    meeting_date = meeting.recorded_at or meeting.created_at
+                    existing_descriptions = None
+                    existing_titles_by_assignee = None
+                    if fathom_created:
+                        existing_descriptions = set()
+                        existing_titles_by_assignee = {}
+                        for t in fathom_created:
+                            existing_descriptions.add(t.description.lower().strip()[:80])
+                            emp_key = t.assigned_to.id if t.assigned_to else None
+                            existing_titles_by_assignee.setdefault(emp_key, set()).add(t.title.lower().strip()[:40])
+                    ai_created = _create_tasks_from_ai_list(
+                        ai_tasks, meeting, meeting_date,
+                        existing_descriptions=existing_descriptions,
+                        existing_titles_by_assignee=existing_titles_by_assignee,
+                    )
+                    if ai_created:
+                        total_count += len(ai_created)
+                        result = send_batch_tasks_email(ai_created)
+                        if result.get('details'):
+                            all_email_details.extend(result['details'])
+            set_done('p2_done', mp.get('p2_done', True) if mp is not None else True)
+
+    if mp is not None:
+        if mp.get('p2_done'):
+            pass
+        elif mp.get('p2_started'):
+            _run_phase2()  # resume: only remaining chunks (stored in p2_chunks)
+        elif Task.objects.filter(meeting=meeting, source='ai').exists():
+            set_done('p2_done', True)  # already generated by a previous completed job
         else:
-            transcript_text = ''
-            if meeting.transcript:
-                for entry in meeting.transcript:
-                    speaker = entry.get('speaker', {}).get('display_name', 'Unknown')
-                    text = entry.get('text', '')
-                    transcript_text += f"{speaker}: {text}\n"
-
-            if transcript_text or meeting.summary:
-                input_text = f"Meeting Title: {meeting.title}\n\n"
-                if transcript_text:
-                    input_text += f"Transcript:\n{transcript_text}\n"
-                elif meeting.summary:
-                    input_text += f"Summary:\n{meeting.summary}\n"
-
-                # Append already-captured tasks so AI knows not to re-create them
-                if fathom_created:
-                    input_text += "\n\nNOTE - The following tasks were ALREADY CAPTURED from this meeting. DO NOT create duplicates of them:\n"
-                    for t in fathom_created:
-                        aname = t.assigned_to.name if t.assigned_to else 'Unassigned'
-                        input_text += f"- {t.title} (assignee: {aname})\n"
-
-                if settings.OPENROUTER_API_KEY:
-                    from .ai_service import generate_tasks_from_summary
-                    ai_tasks = generate_tasks_from_summary(input_text, meeting.title)
-                    if ai_tasks and isinstance(ai_tasks, list):
-                        meeting_date = meeting.recorded_at or meeting.created_at
-                        existing_descriptions = None
-                        existing_titles_by_assignee = None
-                        if fathom_created:
-                            existing_descriptions = set()
-                            existing_titles_by_assignee = {}
-                            for t in fathom_created:
-                                existing_descriptions.add(t.description.lower().strip()[:80])
-                                emp_key = t.assigned_to.id if t.assigned_to else None
-                                existing_titles_by_assignee.setdefault(emp_key, set()).add(t.title.lower().strip()[:40])
-                        ai_created = _create_tasks_from_ai_list(
-                            ai_tasks, meeting, meeting_date,
-                            existing_descriptions=existing_descriptions,
-                            existing_titles_by_assignee=existing_titles_by_assignee,
-                        )
-                        if ai_created:
-                            total_count += len(ai_created)
-                            result = send_batch_tasks_email(ai_created)
-                            if result.get('details'):
-                                all_email_details.extend(result['details'])
+            _run_phase2()
+    else:
+        if not Task.objects.filter(meeting=meeting, source='ai').exists():
+            _run_phase2()
 
     # Phase 3: Auto-generate backlog items (enhancement ideas) from the meeting
     backlog_created = 0
-    if meeting.transcript and settings.OPENROUTER_API_KEY:
+
+    def _run_phase3():
+        nonlocal backlog_created
+        set_done('p3_started', True)
+        if deadline_hit():
+            set_done('p3_done', False)
+            return
         try:
             transcript_text_p3 = ''
             if isinstance(meeting.transcript, list):
@@ -1046,7 +1098,7 @@ def _auto_generate_tasks_for_meeting(meeting):
                 if meeting.summary:
                     meeting_content = f"--- AI Summary ---\n{meeting.summary}\n\n--- Transcript ---\n{transcript_text_p3}"
                 from .ai_service import analyze_meeting_for_enhancements
-                enhancements = analyze_meeting_for_enhancements(meeting_content, meeting.title)
+                enhancements = analyze_meeting_for_enhancements(meeting_content, meeting.title, deadline=deadline, progress=mp)
                 if enhancements and isinstance(enhancements, list):
                     approved = set(
                         BacklogItem.objects.filter(source='auto-capture')
@@ -1090,11 +1142,25 @@ def _auto_generate_tasks_for_meeting(meeting):
                             meeting_date=m_date,
                         )
                         backlog_created += 1
+            set_done('p3_done', mp.get('p3_done', True) if mp is not None else True)
         except Exception as e:
             print(f"_auto_generate_tasks_for_meeting: backlog generation failed for meeting {meeting.id}: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
+            set_done('p3_done', True)
+
+    if meeting.transcript and settings.OPENROUTER_API_KEY:
+        if mp is not None and mp.get('p3_done'):
+            pass
+        else:
+            _run_phase3()
+    elif mp is not None:
+        set_done('p3_done', True)
 
     all_tasks = fathom_created + ai_created
+
+    done = True
+    if mp is not None:
+        done = mp.get('p1_done', True) and mp.get('p2_done', True) and mp.get('p3_done', True)
 
     return {
         'task_count': len(all_tasks),
@@ -1104,6 +1170,7 @@ def _auto_generate_tasks_for_meeting(meeting):
             'failed_count': sum(1 for d in all_email_details if not d.get('sent')),
             'details': all_email_details,
         },
+        'done': done,
     }
 
 
@@ -1113,16 +1180,24 @@ def fathom_sync_view(request):
     try:
         new_meetings, count = sync_meetings()
         # Queue task generation for newly synced meetings (runs in background worker)
-        from .jobs import enqueue_task_generation
+        from .jobs import enqueue_task_generation, sweep
         queued = 0
         for meeting in new_meetings:
             _, is_new = enqueue_task_generation(meeting=meeting)
             if is_new:
                 queued += 1
+        # Process a queued job right now (time-budgeted; resumes across sweeps).
+        sweep_result = None
+        try:
+            sweep_result = sweep(budget_seconds=50)
+        except Exception as e:
+            print(f"fathom_sync: inline sweep failed: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
         return JsonResponse({
             'synced': count,
             'queued_jobs': queued,
             'meeting_ids': [m.id for m in new_meetings],
+            'sweep': sweep_result,
             'message': f'{count} meeting(s) synced; {queued} task-generation job(s) queued.',
         })
     except Exception as e:
@@ -1159,14 +1234,24 @@ def fathom_webhook_view(request):
 
     # Queue task generation instead of running it inline (avoids worker timeouts).
     # Fathom retries are handled safely: enqueue returns the active job if one exists.
-    from .jobs import enqueue_task_generation
+    from .jobs import enqueue_task_generation, sweep
     job, is_new = enqueue_task_generation(meeting=meeting)
+    # Process a queued job right now (time-budgeted; resumes across sweeps).
+    # Never let a sweep failure break the webhook response.
+    sweep_result = None
+    try:
+        sweep_result = sweep(budget_seconds=45)
+        job.refresh_from_db()
+    except Exception as e:
+        print(f"fathom webhook: inline sweep failed: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
     return Response({
         'meeting_id': meeting.id,
         'created': created,
         'queued': True,
         'job_id': job.id,
         'job_status': job.status,
+        'sweep': sweep_result,
     }, status=200)
 
 
@@ -1212,8 +1297,12 @@ def generation_status_view(request):
 
     Query params: meeting_id=<id> for a specific meeting, or batch=1 for the
     latest batch job. Returns queued/running/done/failed plus results.
+
+    While the job is still queued, this poll also runs a short time-budgeted
+    sweep so a serverless deployment can make progress on generation in the
+    background of the frontend's 5s polling.
     """
-    from .jobs import latest_job
+    from .jobs import latest_job, sweep
     batch = request.GET.get('batch') == '1'
     meeting = None
     meeting_id = request.GET.get('meeting_id')
@@ -1225,6 +1314,13 @@ def generation_status_view(request):
     job = latest_job(meeting=meeting, batch=batch)
     if job is None:
         return Response({'status': 'none', 'batch': batch}, status=200)
+
+    if job.status == 'queued':
+        try:
+            sweep(budget_seconds=20)
+            job.refresh_from_db()
+        except Exception as e:
+            print(f"generation_status: sweep failed: {e}", file=sys.stderr)
 
     return Response({
         'status': job.status,
@@ -1239,6 +1335,61 @@ def generation_status_view(request):
         'created_at': job.created_at.isoformat(),
         'finished_at': job.finished_at.isoformat() if job.finished_at else None,
     })
+
+
+def _cron_request_authorized(request):
+    """Gate the cron/process-pending endpoint.
+
+    - Local dev (DEBUG=True): always allowed.
+    - Vercel cron requests carry User-Agent 'vercel-cron/1.0': allowed.
+    - Otherwise requires Authorization: Bearer <CRON_SECRET> or ?secret=.
+    """
+    secret = settings.CRON_SECRET
+    ua = (request.headers.get('User-Agent') or '')
+    if settings.DEBUG:
+        return True
+    if ua.startswith('vercel-cron'):
+        return True
+    if not secret:
+        return False
+    import hmac
+    provided = (request.headers.get('Authorization') or '').removeprefix('Bearer ').strip() or (request.GET.get('secret') or '')
+    return bool(provided) and hmac.compare_digest(provided, secret)
+
+
+def _process_pending_jobs_impl(request):
+    """Serverless-friendly job processor.
+
+    Claims the oldest queued task-generation job and runs it within a time
+    budget (default 50s, max 55s). If the budget is exceeded the job is
+    re-queued and resumed by the next sweep, so long generations complete
+    across multiple invocations (Vercel cron, webhook, or the frontend status
+    poll). Protected with CRON_SECRET when configured.
+    """
+    from .jobs import sweep
+
+    if not _cron_request_authorized(request):
+        return Response({'error': 'unauthorized'}, status=403)
+
+    budget = 50
+    try:
+        budget = max(1, min(int(request.GET.get('budget', 50)), 55))
+    except (TypeError, ValueError):
+        budget = 50
+
+    return Response(sweep(budget_seconds=budget))
+
+
+# The cron endpoint must NOT go through the project-wide SSO bearer auth
+# (api.auth.SSOBearerAuthentication) -- that authenticator rejects every
+# invalid 'Authorization: Bearer <token>' header (e.g. our CRON_SECRET) with
+# 403 before this view even runs. Bypass DRF auth/permissions entirely here;
+# access control is handled by _cron_request_authorized().
+_process_pending_jobs_impl.authentication_classes = []
+_process_pending_jobs_impl.permission_classes = []
+process_pending_jobs = api_view(['GET', 'POST'])(_process_pending_jobs_impl)
+process_pending_jobs.__name__ = 'process_pending_jobs'
+process_pending_jobs.__doc__ = _process_pending_jobs_impl.__doc__
 
 @api_view(['GET'])
 def dashboard_stats(request):

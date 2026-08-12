@@ -11,5 +11,11 @@
       "src": "/(.*)",
       "dest": "backend/wsgi.py"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/tasks/process-pending/",
+      "schedule": "*/5 * * * *"
+    }
   ]
 }

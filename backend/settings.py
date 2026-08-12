@@ -197,6 +197,10 @@ FATHOM_OAUTH_REDIRECT_URI = os.getenv('FATHOM_OAUTH_REDIRECT_URI', 'https://mana
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
 OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'openai/gpt-oss-120b:free')
 
+# Secret guarding the cron/process-pending job sweep endpoint (Vercel cron is
+# allowed via its 'vercel-cron' User-Agent; anything else needs this secret).
+CRON_SECRET = os.getenv('CRON_SECRET', '')
+
 # ── Email Configuration ──
 # Uses console backend by default (prints to console).
 # Set EMAIL_HOST, EMAIL_PORT, EMAIL_HOST_USER, EMAIL_HOST_PASSWORD
