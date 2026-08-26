@@ -158,9 +158,15 @@ def all_fathom_headers():
 
 
 def list_fathom_webhooks(key=None):
-    """List webhooks registered in Fathom for one key (or the first configured)."""
+    """List webhooks registered in Fathom for all keys.
+
+    Returns a list of dicts with api_key, webhook info, and masked key.
+    """
+    import sys as _sys
+    results = []
     for headers in all_fathom_headers():
-        if key and headers.get("X-Api-Key") != key:
+        k = headers.get("X-Api-Key", "")
+        if key and k != key:
             continue
         try:
             resp = requests.get(f"{FATHOM_API_BASE}/webhooks", headers=headers, timeout=30)
@@ -168,10 +174,19 @@ def list_fathom_webhooks(key=None):
                 data = resp.json()
                 items = data.get("webhooks") or data.get("items") or data.get("data") or []
                 if isinstance(items, list):
-                    return items
+                    for item in items:
+                        results.append({
+                            "api_key": k,
+                            "masked": mask_key(k),
+                            "webhook_id": item.get("id", ""),
+                            "destination_url": item.get("url", ""),
+                            "triggered_for": item.get("triggered_for", []),
+                            "secret_set": bool(item.get("secret")),
+                            "source": "fathom_api",
+                        })
         except requests.RequestException as e:
-            print(f"list_fathom_webhooks: {e}", file=__import__('sys').stderr)
-    return []
+            print(f"list_fathom_webhooks: {e}", file=_sys.stderr)
+    return results
 
 
 def register_fathom_webhooks(destination_url, triggered_for=None, force=False):

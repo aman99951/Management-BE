@@ -1205,47 +1205,77 @@ def fathom_sync_view(request):
         traceback.print_exc(file=sys.stderr)
         return JsonResponse({'error': 'Sync failed', 'detail': str(e)}, status=500)
 
-@api_view(['POST'])
+@csrf_exempt
 def fathom_webhook_view(request):
-    # Verify the signature IF we have registered webhooks (best-effort, backwards
-    # compatible: if no webhook is registered yet we accept the payload anyway).
+    """Receive Fathom webhook POSTs.
+
+    Bypasses DRF auth entirely (same approach as process_pending_jobs) so that
+    external webhook POSTs are never blocked by SSO/Session authentication or
+    CSRF enforcement. Signature verification is performed against locally
+    registered secrets when available.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+    import json as _json
     from .models import FathomWebhook
     from .services import verify_fathom_webhook
-    registered = FathomWebhook.objects.exclude(secret__exact='')
-    if registered.exists():
-        raw_body = request.body.decode('utf-8', errors='replace') if request.body else ''
+
+    # --- Signature verification (best-effort, backwards compatible) ----------
+    raw_body = request.body.decode('utf-8', errors='replace') if request.body else ''
+    registered_secrets = list(
+        FathomWebhook.objects.exclude(secret__exact='').values_list('secret', flat=True)
+    )
+    if registered_secrets:
         ok = any(
-            verify_fathom_webhook(w.secret, request.headers, raw_body)
-            for w in registered
+            verify_fathom_webhook(secret, request.headers, raw_body)
+            for secret in registered_secrets
         )
         if not ok:
-            print("fathom webhook: signature verification failed", file=sys.stderr)
-            return Response({'status': 'forbidden', 'reason': 'invalid webhook signature'}, status=403)
+            print(f"[webhook] signature verification FAILED  headers={dict(request.headers)}", file=sys.stderr)
+            return JsonResponse({'status': 'forbidden', 'reason': 'invalid webhook signature'}, status=403)
+        print("[webhook] signature verified OK", file=sys.stderr)
+    else:
+        print("[webhook] no registered secrets — skipping verification", file=sys.stderr)
 
-    payload = request.data if isinstance(request.data, dict) else {}
+    # --- Parse payload -------------------------------------------------------
+    try:
+        payload = _json.loads(raw_body) if raw_body else {}
+    except Exception:
+        payload = {}
+    # DRF may have already parsed it
+    if not payload:
+        try:
+            payload = request.data if isinstance(request.data, dict) else {}
+        except Exception:
+            payload = {}
+
+    print(f"[webhook] payload keys={list(payload.keys())[:15]}  recording_id={payload.get('recording_id')}", file=sys.stderr)
+
     try:
         meeting, created = process_webhook_payload(payload)
     except Exception as e:
-        print(f"fathom webhook: failed to process payload: {e}", file=sys.stderr)
+        print(f"[webhook] failed to process payload: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        return Response({'status': 'error', 'detail': str(e)}, status=200)
-    if meeting is None:
-        return Response({'status': 'ignored', 'reason': 'no recording_id'}, status=200)
+        return JsonResponse({'status': 'error', 'detail': str(e)}, status=200)
 
-    # Queue task generation instead of running it inline (avoids worker timeouts).
-    # Fathom retries are handled safely: enqueue returns the active job if one exists.
+    if meeting is None:
+        print("[webhook] ignored — no usable recording_id", file=sys.stderr)
+        return JsonResponse({'status': 'ignored', 'reason': 'no recording_id'}, status=200)
+
+    # --- Queue task generation ------------------------------------------------
     from .jobs import enqueue_task_generation, sweep
     job, is_new = enqueue_task_generation(meeting=meeting)
-    # Process a queued job right now (time-budgeted; resumes across sweeps).
-    # Never let a sweep failure break the webhook response.
     sweep_result = None
     try:
         sweep_result = sweep(budget_seconds=45)
         job.refresh_from_db()
     except Exception as e:
-        print(f"fathom webhook: inline sweep failed: {e}", file=sys.stderr)
+        print(f"[webhook] inline sweep failed: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-    return Response({
+
+    print(f"[webhook] meeting={meeting.id} created={created} job={job.id} status={job.status}", file=sys.stderr)
+    return JsonResponse({
         'meeting_id': meeting.id,
         'created': created,
         'queued': True,
@@ -1255,31 +1285,61 @@ def fathom_webhook_view(request):
     }, status=200)
 
 
-@api_view(['GET', 'POST'])
+@api_view(['GET', 'POST', 'DELETE'])
 def fathom_webhook_register_view(request):
     """GET: list webhooks registered in this app (there is no Fathom list API).
     POST: register a webhook for every configured Fathom account.
+    DELETE: remove a webhook from Fathom and from the local DB.
     """
-    from .services import register_fathom_webhooks, mask_key
+    from .services import register_fathom_webhooks, delete_fathom_webhook, mask_key
     from .models import FathomWebhook
 
     if request.method == 'GET':
+        from .services import list_fathom_webhooks
+        # Start with locally registered webhooks
+        local = {
+            w.webhook_id: {
+                'api_key': w.api_key,
+                'masked': mask_key(w.api_key),
+                'webhook_id': w.webhook_id,
+                'destination_url': w.destination_url,
+                'secret_set': bool(w.secret),
+                'triggered_for': w.triggered_for,
+                'registered_at': w.created_at.isoformat() if w.created_at else None,
+                'source': 'local',
+            }
+            for w in FathomWebhook.objects.all()
+        }
+        # Merge in any webhooks Fathom knows about that we don't have locally
+        # (e.g. added manually in Fathom's dashboard)
+        try:
+            for fw in list_fathom_webhooks():
+                wid = fw.get('webhook_id', '')
+                if wid and wid not in local:
+                    local[wid] = fw
+        except Exception as e:
+            print(f"fathom_webhook_register: list from API failed: {e}", file=sys.stderr)
         return Response({
-            'webhooks': [
-                {
-                    'api_key': w.api_key,
-                    'masked': mask_key(w.api_key),
-                    'webhook_id': w.webhook_id,
-                    'destination_url': w.destination_url,
-                    'secret_set': bool(w.secret),
-                    'triggered_for': w.triggered_for,
-                    'registered_at': w.created_at.isoformat() if w.created_at else None,
-                }
-                for w in FathomWebhook.objects.all()
-            ],
-            'detail': 'Webhooks registered in this app.',
+            'webhooks': list(local.values()),
+            'detail': 'Webhooks from local DB and Fathom API.',
         })
 
+    if request.method == 'DELETE':
+        webhook_id = (request.data.get('webhook_id') or '').strip()
+        api_key = (request.data.get('api_key') or '').strip() or None
+        if not webhook_id:
+            return Response({'error': 'webhook_id is required'}, status=400)
+        ok, msg = delete_fathom_webhook(webhook_id, key=api_key)
+        # Remove from local DB regardless (Fathom may have already deleted it)
+        deleted_count, _ = FathomWebhook.objects.filter(webhook_id=webhook_id).delete()
+        if ok:
+            return Response({'status': 'deleted', 'webhook_id': webhook_id, 'detail': msg})
+        elif deleted_count:
+            return Response({'status': 'removed_locally', 'webhook_id': webhook_id, 'detail': f'Fathom: {msg}. Local record removed.'})
+        else:
+            return Response({'status': 'error', 'detail': msg}, status=400)
+
+    # POST
     destination_url = (request.data.get('destination_url') or '').strip()
     if not destination_url:
         return Response({'error': 'destination_url is required'}, status=400)
