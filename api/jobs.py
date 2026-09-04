@@ -165,7 +165,11 @@ def run_job(job, deadline=None):
         import traceback
         traceback.print_exc()
         job.status = 'failed'
-        job.error = f'{type(e).__name__}: {e}'[:2000]
+        from .ai_service import ModelError
+        if isinstance(e, ModelError):
+            job.error = str(e)[:2000]
+        else:
+            job.error = f'{type(e).__name__}: {e}'[:2000]
 
     job.finished_at = timezone.now()
     job.save(update_fields=['task_count', 'backlog_count', 'emails_sent', 'emails_failed', 'status', 'error', 'progress', 'finished_at'])

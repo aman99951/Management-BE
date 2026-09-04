@@ -1143,7 +1143,12 @@ def _auto_generate_tasks_for_meeting(meeting, deadline=None, progress=None):
                         )
                         backlog_created += 1
             set_done('p3_done', mp.get('p3_done', True) if mp is not None else True)
+        except ImportError:
+            raise
         except Exception as e:
+            from .ai_service import ModelError
+            if isinstance(e, ModelError):
+                raise  # surface model errors (rate limit/unavailable/credits) to the UI
             print(f"_auto_generate_tasks_for_meeting: backlog generation failed for meeting {meeting.id}: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             set_done('p3_done', True)

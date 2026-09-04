@@ -197,7 +197,7 @@ GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
 
 FATHOM_OAUTH_REDIRECT_URI = os.getenv('FATHOM_OAUTH_REDIRECT_URI', 'https://management-f-e.vercel.app/settings')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
-OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'openai/gpt-oss-120b:free')
+OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'z-ai/glm-5.2:free')
 
 # Secret guarding the cron/process-pending job sweep endpoint (Vercel cron is
 # allowed via its 'vercel-cron' User-Agent; anything else needs this secret).
